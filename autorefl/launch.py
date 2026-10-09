@@ -236,7 +236,7 @@ if __name__ == '__main__':
         signals = Signaller()
         client = FitClient(
             host=os.environ.get('AUTOREFL_FIT_HOST', '127.0.0.1'),
-            port=int(os.environ.get('AUTOREFL_FIT_PORT', '5100')),
+            port=int(os.environ.get('AUTOREFL_FIT_PORT', '5031')),
         )
 
         nice_api = await asyncio.to_thread(nice_connect, NICE_HOST, NICE_CLIENT)

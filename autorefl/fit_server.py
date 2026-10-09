@@ -5,7 +5,7 @@ single HDF5 byte stream. Deploy on an HPC node; point FitClient at it.
 
 Usage::
 
-    python -m autorefl.fit_server [--host 0.0.0.0] [--port 5100]
+    python -m autorefl.fit_server [--host 0.0.0.0] [--port 5031]
 """
 
 import argparse
@@ -650,6 +650,6 @@ if __name__ == '__main__':
     logging.basicConfig(level=logging.INFO)
     parser = argparse.ArgumentParser(description='AutoRefl fit server')
     parser.add_argument('--host', default='0.0.0.0')
-    parser.add_argument('--port', type=int, default=5100)
+    parser.add_argument('--port', type=int, default=5031)
     args = parser.parse_args()
     web.run_app(build_app(), host=args.host, port=args.port)
