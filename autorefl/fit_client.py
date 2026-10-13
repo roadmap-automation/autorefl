@@ -5,6 +5,7 @@ bumps webview WebSocket protocol, FitClient sends the problem over HTTP and
 receives HDF5 bytes containing both the DREAM state and Q-profiles.
 """
 
+import asyncio
 import io
 import json
 import logging
@@ -43,11 +44,23 @@ class FitClient:
         Hostname or IP of the fit server.
     port:
         TCP port the fit server is listening on.
+    max_retries:
+        Number of reconnect attempts on ClientError before giving up.
+    retry_delay_s:
+        Seconds to wait between reconnect attempts.
     """
 
-    def __init__(self, host: str = '127.0.0.1', port: int = 5100) -> None:
+    def __init__(
+        self,
+        host: str = '127.0.0.1',
+        port: int = 5100,
+        max_retries: int = 3,
+        retry_delay_s: float = 10.0,
+    ) -> None:
         self.base_url = f'http://{host}:{port}'
         self._session: Optional[aiohttp.ClientSession] = None
+        self._max_retries = max_retries
+        self._retry_delay_s = retry_delay_s
 
     async def connect(self) -> None:
         connector = aiohttp.TCPConnector()
@@ -73,6 +86,30 @@ class FitClient:
             raise RuntimeError('FitClient not connected — call connect() first.')
         return self._session
 
+    async def _reconnect(self) -> None:
+        try:
+            if self._session is not None:
+                await self._session.close()
+        except Exception:
+            pass
+        self._session = None
+        await self.connect()
+
+    async def _with_retry(self, make_coro):
+        """Run make_coro(), reconnecting and retrying on aiohttp.ClientError."""
+        for attempt in range(self._max_retries + 1):
+            try:
+                return await make_coro()
+            except aiohttp.ClientError as exc:
+                if attempt == self._max_retries:
+                    raise
+                logger.warning(
+                    'FitClient: connection error (%s), reconnecting in %.0fs (attempt %d/%d)',
+                    exc, self._retry_delay_s, attempt + 1, self._max_retries,
+                )
+                await asyncio.sleep(self._retry_delay_s)
+                await self._reconnect()
+
     async def post_fit(
         self,
         problem,
@@ -96,31 +133,32 @@ class FitClient:
         qprofs : list[np.ndarray]
             One array per model, shape (ndraw, nQ).
         """
-        session = self._session_or_raise()
-
         problem_bytes = dill.dumps(problem)
-
-        data = aiohttp.FormData()
-        data.add_field('problem', problem_bytes, content_type='application/octet-stream')
-        data.add_field('fit_options', json.dumps(fit_options))
-        data.add_field('warm_start', 'true' if warm_start else 'false')
-        data.add_field('calc_tdtldl', _encode_tdtldl(calc_tdtldl))
-        data.add_field('oversampling', str(oversampling))
-        data.add_field('resolution', resolution)
-        if requested_derived_labels:
-            data.add_field('requested_derived_labels', json.dumps(requested_derived_labels))
-
+        encoded_tdtldl = _encode_tdtldl(calc_tdtldl)
         timeout = aiohttp.ClientTimeout(total=timeout_s)
-        async with session.post(
-            f'{self.base_url}/fit',
-            data=data,
-            timeout=timeout,
-        ) as resp:
-            if resp.status != 200:
-                body = await resp.text()
-                raise RuntimeError(f'Fit server returned {resp.status}: {body}')
-            hdf5_bytes = await resp.read()
 
+        async def _impl():
+            session = self._session_or_raise()
+            data = aiohttp.FormData()
+            data.add_field('problem', problem_bytes, content_type='application/octet-stream')
+            data.add_field('fit_options', json.dumps(fit_options))
+            data.add_field('warm_start', 'true' if warm_start else 'false')
+            data.add_field('calc_tdtldl', encoded_tdtldl)
+            data.add_field('oversampling', str(oversampling))
+            data.add_field('resolution', resolution)
+            if requested_derived_labels:
+                data.add_field('requested_derived_labels', json.dumps(requested_derived_labels))
+            async with session.post(
+                f'{self.base_url}/fit',
+                data=data,
+                timeout=timeout,
+            ) as resp:
+                if resp.status != 200:
+                    body = await resp.text()
+                    raise RuntimeError(f'Fit server returned {resp.status}: {body}')
+                return await resp.read()
+
+        hdf5_bytes = await self._with_retry(_impl)
         return _parse_fit_hdf5(hdf5_bytes)
 
     async def post_qprofiles(
@@ -141,28 +179,30 @@ class FitClient:
         qprofs : list[np.ndarray]
             One array per model, shape (npoints, nQ).
         """
-        session = self._session_or_raise()
-
         problem_bytes = dill.dumps(problem)
-
-        data = aiohttp.FormData()
-        data.add_field('problem', problem_bytes, content_type='application/octet-stream')
-        data.add_field('draw_points', json.dumps(draw_points.tolist()))
-        data.add_field('calc_tdtldl', _encode_tdtldl(calc_tdtldl))
-        data.add_field('oversampling', str(oversampling))
-        data.add_field('resolution', resolution)
-
+        encoded_tdtldl = _encode_tdtldl(calc_tdtldl)
+        encoded_points = json.dumps(draw_points.tolist())
         timeout = aiohttp.ClientTimeout(total=timeout_s)
-        async with session.post(
-            f'{self.base_url}/qprofiles',
-            data=data,
-            timeout=timeout,
-        ) as resp:
-            if resp.status != 200:
-                body = await resp.text()
-                raise RuntimeError(f'Fit server /qprofiles returned {resp.status}: {body}')
-            hdf5_bytes = await resp.read()
 
+        async def _impl():
+            session = self._session_or_raise()
+            data = aiohttp.FormData()
+            data.add_field('problem', problem_bytes, content_type='application/octet-stream')
+            data.add_field('draw_points', encoded_points)
+            data.add_field('calc_tdtldl', encoded_tdtldl)
+            data.add_field('oversampling', str(oversampling))
+            data.add_field('resolution', resolution)
+            async with session.post(
+                f'{self.base_url}/qprofiles',
+                data=data,
+                timeout=timeout,
+            ) as resp:
+                if resp.status != 200:
+                    body = await resp.text()
+                    raise RuntimeError(f'Fit server /qprofiles returned {resp.status}: {body}')
+                return await resp.read()
+
+        hdf5_bytes = await self._with_retry(_impl)
         buf = io.BytesIO(hdf5_bytes)
         with h5py.File(buf, 'r') as f:
             return _read_qprofs(f)
@@ -184,24 +224,24 @@ class FitClient:
             ``derived_draws``   — np.ndarray (N, D), derived values at those draws
                                   (shape (N, 0) when no derived parameters)
         """
-        session = self._session_or_raise()
-
         problem_bytes = dill.dumps(problem)
-
-        data = aiohttp.FormData()
-        data.add_field('problem', problem_bytes, content_type='application/octet-stream')
-
         timeout = aiohttp.ClientTimeout(total=timeout_s)
-        async with session.post(
-            f'{self.base_url}/setup',
-            data=data,
-            timeout=timeout,
-        ) as resp:
-            if resp.status != 200:
-                body = await resp.text()
-                raise RuntimeError(f'Fit server /setup returned {resp.status}: {body}')
-            hdf5_bytes = await resp.read()
 
+        async def _impl():
+            session = self._session_or_raise()
+            data = aiohttp.FormData()
+            data.add_field('problem', problem_bytes, content_type='application/octet-stream')
+            async with session.post(
+                f'{self.base_url}/setup',
+                data=data,
+                timeout=timeout,
+            ) as resp:
+                if resp.status != 200:
+                    body = await resp.text()
+                    raise RuntimeError(f'Fit server /setup returned {resp.status}: {body}')
+                return await resp.read()
+
+        hdf5_bytes = await self._with_retry(_impl)
         buf = io.BytesIO(hdf5_bytes)
         npars = len(problem.getp())
         with h5py.File(buf, 'r') as f:
@@ -223,15 +263,19 @@ class FitClient:
 
     async def post_reset(self, timeout_s: float = 10.0) -> None:
         """Clear the server warm-start chain and derived parameter state."""
-        session = self._session_or_raise()
         timeout = aiohttp.ClientTimeout(total=timeout_s)
-        async with session.post(
-            f'{self.base_url}/reset',
-            timeout=timeout,
-        ) as resp:
-            if resp.status != 200:
-                body = await resp.text()
-                raise RuntimeError(f'Fit server /reset returned {resp.status}: {body}')
+
+        async def _impl():
+            session = self._session_or_raise()
+            async with session.post(
+                f'{self.base_url}/reset',
+                timeout=timeout,
+            ) as resp:
+                if resp.status != 200:
+                    body = await resp.text()
+                    raise RuntimeError(f'Fit server /reset returned {resp.status}: {body}')
+
+        await self._with_retry(_impl)
 
     async def post_derived_draws(
         self,
@@ -256,26 +300,27 @@ class FitClient:
         derived_draws : np.ndarray, shape (N, D)
             One column per requested label.
         """
-        session = self._session_or_raise()
-
         problem_bytes = dill.dumps(problem)
-
-        data = aiohttp.FormData()
-        data.add_field('problem', problem_bytes, content_type='application/octet-stream')
-        data.add_field('draw_points', json.dumps(draw_points.tolist()))
-        data.add_field('requested_labels', json.dumps(requested_labels))
-
+        encoded_points = json.dumps(draw_points.tolist())
         timeout = aiohttp.ClientTimeout(total=timeout_s)
-        async with session.post(
-            f'{self.base_url}/derived_draws',
-            data=data,
-            timeout=timeout,
-        ) as resp:
-            if resp.status != 200:
-                body = await resp.text()
-                raise RuntimeError(f'Fit server /derived_draws returned {resp.status}: {body}')
-            hdf5_bytes = await resp.read()
 
+        async def _impl():
+            session = self._session_or_raise()
+            data = aiohttp.FormData()
+            data.add_field('problem', problem_bytes, content_type='application/octet-stream')
+            data.add_field('draw_points', encoded_points)
+            data.add_field('requested_labels', json.dumps(requested_labels))
+            async with session.post(
+                f'{self.base_url}/derived_draws',
+                data=data,
+                timeout=timeout,
+            ) as resp:
+                if resp.status != 200:
+                    body = await resp.text()
+                    raise RuntimeError(f'Fit server /derived_draws returned {resp.status}: {body}')
+                return await resp.read()
+
+        hdf5_bytes = await self._with_retry(_impl)
         buf = io.BytesIO(hdf5_bytes)
         with h5py.File(buf, 'r') as f:
             return f['derived/draws'][()]
