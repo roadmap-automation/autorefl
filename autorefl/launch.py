@@ -7,8 +7,9 @@ import time
 
 import numpy as np
 
-from autorefl.remote.nicedata import NICECampaignTask, Signaller
+from autorefl.remote.nicedata import Signaller
 from autorefl.remote.monitor import SocketServer, buttonhandler, emit_history
+from autorefl.backend import MeasurementBackend
 
 from autorefl.autorefl import AutoReflExperiment
 from autorefl.calibration import calibrate_intensity
@@ -19,50 +20,48 @@ class AutoReflLauncher:
 
     Lifecycle::
 
+        from autorefl.remote.nicedata import NICECampaignTask, NICEBackend
+
         task = NICECampaignTask(instr.trajectoryMotors(), filename)
         launcher = AutoReflLauncher(exp, client, signals, maxtime, pathname,
-                                    nice_task=task, nice_api=api)
+                                    backend=NICEBackend(task))
         await asyncio.gather(
             asyncio.to_thread(api.serve_tasks, task),
             launcher.run(),
         )
 
-    When ``nice_task`` is None the loop still works in simulation — ``measure_step``
-    can be overridden directly with any async callable before calling ``run()``.
+    For simulation, use :class:`~autorefl.backend.SimulatedBackend`.
+    For custom hardware, subclass :class:`~autorefl.backend.MeasurementBackend`
+    and implement ``measure()``.
     """
 
     def __init__(self,
                  exp: AutoReflExperiment,
-                 client,                      # Refl1DClient
+                 client,
                  signals: Signaller,
                  maxtime: float,
                  pathname: str,
-                 nice_task: NICECampaignTask | None = None,
-                 nice_api=None,
-                 intensity_template=None,     # reductus template dict; None → use simulation fallback
-                 intensity_files=None) -> None:        # list[FileInfo] from IntensityDatabase
+                 backend: MeasurementBackend,
+                 intensity_template=None,
+                 intensity_files=None) -> None:
+        if backend is None:
+            raise ValueError(
+                'backend is required. Pass a MeasurementBackend instance '
+                '(NICEBackend, SimulatedBackend, or a custom subclass).'
+            )
         self.exp = exp
         self.client = client
         self.signals = signals
         self.maxtime = maxtime
         self.pathname = pathname
-        self.nice_task = nice_task
-        self.nice_api = nice_api
+        self.backend = backend
         self.intensity_template = intensity_template
         self.intensity_files = intensity_files
         self._stop = asyncio.Event()
 
-        # Async callable: (points: List[List[MeasurementPoint]]) -> Dict[int, List[DataPoint]]
-        if nice_task is not None:
-            self.measure_step = nice_task.measure
-        else:
-            self.measure_step = None
-
     def stop(self) -> None:
         self._stop.set()
-        if self.nice_task is not None:
-            self.nice_task.stop()
-        # unblock any signal-based wait in case caller holds old-style signals
+        self.backend.stop()
         self.signals.global_start.set()
         self.signals.measurement_queue_updated.set()
         self.signals.first_measurement_complete.set()
@@ -74,11 +73,21 @@ class AutoReflLauncher:
                 self.exp.steps[step_id].points = points
 
     async def run(self) -> None:
+        def _log_socket_error(task):
+            if not task.cancelled() and task.exception() is not None:
+                import traceback
+                print('AutoLauncher: monitor failed:', ''.join(traceback.format_exception(task.exception())))
+
         socket_task = asyncio.create_task(SocketServer().serve())
+        socket_task.add_done_callback(_log_socket_error)
 
         # register stop/start button callbacks
         buttonhandler.start_callbacks.append(self.signals.global_start.set)
         buttonhandler.stop_callbacks.append(self.stop)
+        buttonhandler.terminate_count_callbacks.append(self.backend.terminate_count)
+        def _terminate_fit() -> None:
+            asyncio.create_task(self.client.post_stop_fit())
+        buttonhandler.terminate_fit_callbacks.append(_terminate_fit)
 
         await asyncio.sleep(1)
         await self.signals.global_start.wait()
@@ -98,59 +107,83 @@ class AutoReflLauncher:
         k = 0
         warm_start = False
 
-        while total_t < self.maxtime and not self._stop.is_set():
+        try:
+            while total_t < self.maxtime and not self._stop.is_set():
 
-            self.exp.add_step([])
-            print('AutoLauncher: Step %i, total time so far: %.1f s' % (k, total_t))
+                self.exp.add_step([])
+                print('AutoLauncher: Step %i, total time so far: %.1f s' % (k, total_t), flush=True)
 
-            data = await self.measure_step(points)
-            self._load_data(data)
-
-            # track latest instrument position for FOM planning
-            if self.nice_task is not None and self.nice_task.last_x is not None:
-                self.exp.instrument.x = self.nice_task.last_x
-
-            if self._stop.is_set():
-                break
-
-            print('AutoLauncher: fitting data')
-            await self.exp.fit_step(self.client, warm_start=warm_start)
-            warm_start = True
-
-            step = self.exp.steps[-1]
-            print('AutoLauncher: final chi-squared:', step.final_chisq)
-
-            # emit posterior R(Q) credible intervals
-            await emit_history('autorefl_profiles', self.update_plot_profiles(step.qprofs))
-            # emit reduced R(Q) data
-            await emit_history('autorefl_data', self.update_plot_data())
-            # emit convergence trace (entropy + chisq across all steps so far)
-            convergence = [
-                {'step': i, 'dH': s.dH, 'dH_marg': s.dH_marg, 'chisq': s.final_chisq}
-                for i, s in enumerate(self.exp.steps)
-                if s.dH is not None
-            ]
-            await emit_history('autorefl_convergence', json.dumps(convergence))
-
-            print('AutoLauncher: calculating FOM')
-            points = await asyncio.to_thread(self.exp.take_step, allow_repeat=False)
-
-            # emit FOM landscape for the step just completed
-            step = self.exp.steps[-1]
-            if step.foms is not None:
-                fom_data = [
-                    {'model': m, 'x': list(self.exp.x[m]), 'fom': list(fom.tolist())}
-                    for m, fom in enumerate(step.foms)
+                await emit_history('new_step', {'step': k, 'text': f'Step {k}'})
+                queue_data = [
+                    {'step_id': mp.step_id, 'point_id': mp.point_id, 'point_index': i,
+                     'model': mp.base.model, 'x': f'{mp.base.x:.4f}',
+                     'intent': str(mp.base.intent), 'time': f'{mp.base.t:.1f}'}
+                    for ptlist in points for i, mp in enumerate(ptlist)
                 ]
-                await emit_history('autorefl_fom', json.dumps(fom_data))
+                await emit_history('queue_update', queue_data)
 
-            print('AutoLauncher: saving')
-            await asyncio.to_thread(self.exp.save, self.pathname + '/autoexp0.pickle')
+                data = await self.backend.measure(points)
+                self._load_data(data)
 
-            total_t = sum(pt.t + pt.movet for step in self.exp.steps for pt in step.points)
-            k += 1
+                if self.backend.last_x is not None:
+                    self.exp.instrument.x = self.backend.last_x
 
-        socket_task.cancel()
+                if self._stop.is_set():
+                    break
+
+                print('AutoLauncher: fitting data', flush=True)
+                def _fit_progress(step: int, nllf: float) -> None:
+                    asyncio.create_task(emit_history('fit_update', f'step {step}, nllf={nllf:.4f}'))
+                await self.exp.fit_step(self.client, warm_start=warm_start, progress_callback=_fit_progress)
+                warm_start = True
+
+                step = self.exp.steps[-1]
+                print('AutoLauncher: final chi-squared:', step.final_chisq, flush=True)
+
+                try:
+                    await emit_history('autorefl_profiles', self.update_plot_profiles(step.qprofs))
+                    await emit_history('autorefl_data', self.update_plot_data())
+                    convergence = [
+                        {'step': i, 'dH': s.dH, 'dH_marg': s.dH_marg, 'chisq': s.final_chisq}
+                        for i, s in enumerate(self.exp.steps)
+                        if s.dH is not None
+                    ]
+                    await emit_history('autorefl_convergence', json.dumps(convergence))
+                except Exception:
+                    import traceback
+                    traceback.print_exc()
+
+                print('AutoLauncher: calculating FOM', flush=True)
+                points = await asyncio.to_thread(self.exp.take_step, allow_repeat=False)
+
+                step = self.exp.steps[-1]
+                try:
+                    if step.foms is not None:
+                        fom_data = [
+                            {'model': m, 'x': list(self.exp.x[m]), 'fom': list(fom.tolist())}
+                            for m, fom in enumerate(step.foms)
+                        ]
+                        await emit_history('autorefl_fom', json.dumps(fom_data))
+                except Exception:
+                    import traceback
+                    traceback.print_exc()
+
+                print('AutoLauncher: saving', flush=True)
+                await asyncio.to_thread(self.exp.save, self.pathname + '/autoexp0.pickle')
+
+                total_t = sum(pt.t + pt.movet for step in self.exp.steps for pt in step.points)
+                k += 1
+        except Exception:
+            import traceback
+            print('AutoLauncher: unhandled exception in run loop:', flush=True)
+            traceback.print_exc()
+            raise
+        finally:
+            socket_task.cancel()
+            try:
+                await socket_task
+            except asyncio.CancelledError:
+                pass
 
     def update_plot_data(self) -> str:
         from autorefl.reduction import reduce
@@ -180,6 +213,7 @@ if __name__ == '__main__':
     from autorefl.instrument import MAGIK, CANDOR
     from bumps.cli import load_model
     from autorefl.fit_client import FitClient
+    from autorefl.remote.nicedata import NICECampaignTask, NICEBackend
     from nice.remote import connect as nice_connect
 
     instr = MAGIK()
@@ -248,7 +282,7 @@ if __name__ == '__main__':
         await client.connect()
         try:
             launcher = AutoReflLauncher(exp, client, signals, maxtime=7200, pathname=pathname,
-                                        nice_task=nice_task, nice_api=nice_api)
+                                        backend=NICEBackend(nice_task))
             await asyncio.gather(
                 asyncio.to_thread(nice_api.serve_tasks, nice_task),
                 launcher.run(),

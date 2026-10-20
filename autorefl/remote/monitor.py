@@ -15,7 +15,6 @@ _HERE = Path(__file__).parent
 sio = socketio.AsyncServer(async_mode='aiohttp')
 app = web.Application()
 sio.attach(app)
-socketlock: asyncio.Lock = asyncio.Lock()
 sockethistory: list = []
 
 async def hello(request):
@@ -25,21 +24,25 @@ app.add_routes([web.get('/', hello)])
 app.add_routes([web.static('/lib', _HERE / 'lib')])
 
 async def emit_history(event, data, sid=None):
-    async with socketlock:
-        await sio.emit(event, data, to=sid)
+    try:
+        await asyncio.wait_for(sio.emit(event, data, to=sid), timeout=5.0)
         sockethistory.append((event, data))
+    except Exception:
+        import logging, traceback
+        logging.getLogger(__name__).debug('emit_history failed: %s', traceback.format_exc())
 
 @sio.on('connect')
 async def dump_history(sid, data):
     print(f'New connection from {sid}')
-    async with socketlock:
-        for item in sockethistory:
-            #print(item)
-            await sio.emit(*item, to=sid)
+    for item in sockethistory:
+        try:
+            await asyncio.wait_for(sio.emit(*item, to=sid), timeout=5.0)
+        except Exception:
+            break
 
 class SocketServer(StoppableThread):
 
-    def __init__(self, *args, host='0.0.0.0', port=5012, **kwargs):
+    def __init__(self, *args, host='127.0.0.1', port=5012, **kwargs):
         super().__init__(*args, **kwargs)
         self.host = host
         self.port = port
@@ -58,18 +61,22 @@ class SocketServer(StoppableThread):
 
         qlisten = asyncio.create_task(self.emit_queue())
 
-        await asyncio.to_thread(self._stop_event.wait)
-        self.inqueue.put((None, None), block=False)
-        await asyncio.gather(runner.cleanup(),
-                             qlisten)
+        try:
+            while not self._stop_event.is_set():
+                await asyncio.sleep(0.5)
+        except asyncio.CancelledError:
+            pass
+        finally:
+            self.inqueue.put((None, None), block=False)
+            await asyncio.gather(runner.cleanup(), qlisten, return_exceptions=True)
 
     async def emit_queue(self):
 
         while not self.stopped():
             event, data = await asyncio.to_thread(self.inqueue.get)
-            print(event, data)
-            if event is not None:
-                await emit_history(event, data)
+            if event is None:
+                break
+            await emit_history(event, data)
 
     def write(self, data):
         self.inqueue.put(data)

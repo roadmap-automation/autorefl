@@ -172,7 +172,9 @@ class NICECampaignTask(Task):
     Typical wiring::
 
         task = NICECampaignTask(motors, filename)
-        launcher.measure_step = task.measure
+        backend = NICEBackend(task)
+        launcher = AutoReflLauncher(exp, client, signals, maxtime, pathname,
+                                    backend=backend)
         await asyncio.gather(
             asyncio.to_thread(api.serve_tasks, task),
             launcher.run(),
@@ -194,6 +196,10 @@ class NICECampaignTask(Task):
         """Async callable for the event loop: submit points, await data back."""
         self._points_in.put(points)
         return await asyncio.to_thread(self._data_out.get)
+
+    def terminate_count(self) -> None:
+        if self._active_count is not None and not self._active_count.isFinished():
+            self.api.terminateCount()
 
     def stop(self) -> None:
         self._stop_event.set()
@@ -253,6 +259,38 @@ class NICECampaignTask(Task):
         datapoint.data = basedata
         datapoint.t = livetime
         data.setdefault(pt.step_id, []).append(datapoint)
+
+
+class NICEBackend:
+    """MeasurementBackend wrapping a :class:`NICECampaignTask`.
+
+    Parameters
+    ----------
+    nice_task:
+        A :class:`NICECampaignTask` instance.  The caller is responsible
+        for running ``api.serve_tasks(nice_task)`` in a separate thread
+        (typically via ``asyncio.to_thread``) alongside ``launcher.run()``.
+    """
+
+    def __init__(self, nice_task: NICECampaignTask) -> None:
+        self.nice_task = nice_task
+
+    @property
+    def last_x(self) -> float | None:
+        """Most recently measured x position reported by the NICE task."""
+        return self.nice_task.last_x
+
+    async def measure(
+        self,
+        points: List[List['MeasurementPoint']],
+    ) -> Dict[int, List['DataPoint']]:
+        return await self.nice_task.measure(points)
+
+    def terminate_count(self) -> None:
+        self.nice_task.terminate_count()
+
+    def stop(self) -> None:
+        self.nice_task.stop()
 
 
 class MeasurementDevice(StoppableThread):

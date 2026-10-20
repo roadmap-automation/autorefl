@@ -13,11 +13,18 @@ import asyncio
 import io
 import json
 import logging
+import queue as stdlib_queue
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
 
 import concurrent.futures
 import multiprocessing
+import multiprocessing.managers
+import signal
+import threading
+
+_shutdown = threading.Event()
+_QUEUE_DONE = object()
 
 import dill
 import h5py
@@ -26,6 +33,7 @@ from aiohttp import web
 
 from bumps.fitters import DreamFit, MonitorRunner
 from bumps.initpop import generate
+from bumps.serialize import deserialize as bumps_deserialize
 from .simulation import calc_expected_R
 
 logger = logging.getLogger(__name__)
@@ -246,6 +254,7 @@ class ServerState:
     # populated by /setup, cleared by /reset
     derived_labels: List[str] = field(default_factory=list)
     derived_prior_scales: np.ndarray = field(default_factory=lambda: np.array([]))
+    abort_fit: threading.Event = field(default_factory=threading.Event)
 
 
 routes = web.RouteTableDef()
@@ -265,7 +274,7 @@ async def post_setup(request: web.Request) -> web.Response:
     """One-time setup: discover derived parameters, compute prior scales, return prior draws.
 
     Multipart fields:
-        problem — dill-serialised bumps FitProblem bytes
+        problem — bumps-serialised FitProblem JSON
 
     Response: HDF5 with:
         attrs['native_labels']  — JSON list[str] from problem.labels()
@@ -277,15 +286,14 @@ async def post_setup(request: web.Request) -> web.Response:
     state: ServerState = request.app['state']
     try:
         reader = await request.multipart()
-        problem_bytes = None
+        fields = {}
         async for part in reader:
-            if part.name == 'problem':
-                problem_bytes = await part.read()
+            fields[part.name] = (await part.read()).decode()
 
-        if problem_bytes is None:
+        if 'problem' not in fields:
             return web.json_response({'error': 'missing problem field'}, status=400)
 
-        problem = dill.loads(problem_bytes)
+        problem = bumps_deserialize(json.loads(fields['problem']))
 
         derived_labels, prior_scales, native_draws, derived_draws = \
             await asyncio.to_thread(_discover_derived, problem)
@@ -328,12 +336,25 @@ async def post_reset(request: web.Request) -> web.Response:
     return web.json_response({'status': 'ok'})
 
 
+@routes.post('/stop_fit')
+async def post_stop_fit(request: web.Request) -> web.Response:
+    """Signal the running DreamFit to stop early.
+
+    Sets the per-job abort event so the next monitors.stopping() check
+    returns True.  Has no effect if no fit is currently running.
+    """
+    state: ServerState = request.app['state']
+    state.abort_fit.set()
+    logger.info('Fit abort requested.')
+    return web.json_response({'status': 'ok'})
+
+
 @routes.post('/derived_draws')
 async def post_derived_draws(request: web.Request) -> web.Response:
     """Evaluate molgroups derived quantities at posterior draw points.
 
     Multipart fields:
-        problem          — dill-serialised bumps FitProblem bytes
+        problem          — bumps-serialised FitProblem JSON
         draw_points      — JSON: 2-D array (ndraw × npars)
         requested_labels — JSON: list[str] of derived parameter names to return
 
@@ -344,17 +365,13 @@ async def post_derived_draws(request: web.Request) -> web.Response:
     try:
         reader = await request.multipart()
         fields = {}
-        problem_bytes = None
         async for part in reader:
-            if part.name == 'problem':
-                problem_bytes = await part.read()
-            else:
-                fields[part.name] = (await part.read()).decode()
+            fields[part.name] = (await part.read()).decode()
 
-        if problem_bytes is None:
+        if 'problem' not in fields:
             return web.json_response({'error': 'missing problem field'}, status=400)
 
-        problem = dill.loads(problem_bytes)
+        problem = bumps_deserialize(json.loads(fields['problem']))
         draw_points = np.array(json.loads(fields['draw_points']))
         requested_labels = json.loads(fields.get('requested_labels', '[]'))
 
@@ -379,7 +396,9 @@ async def post_derived_draws(request: web.Request) -> web.Response:
         return web.json_response({'error': str(e)}, status=500)
 
 
-def _run_dream(problem, fit_options: dict, fitter: Optional[DreamFit]) -> DreamFit:
+def _run_dream(problem, fit_options: dict, fitter: Optional[DreamFit],
+               progress_q: Optional[stdlib_queue.Queue] = None,
+               abort_event: Optional[threading.Event] = None) -> DreamFit:
     """Synchronous DreamFit run. Intended to be called in a thread.
 
     Pass an existing fitter for warm-start (its state is resumed); pass None
@@ -391,7 +410,20 @@ def _run_dream(problem, fit_options: dict, fitter: Optional[DreamFit]) -> DreamF
         # Re-attach to new problem object (deserialized each call)
         fitter.problem = problem
 
-    monitors = MonitorRunner(monitors=[], problem=problem)
+    class _StdoutMonitor:
+        def config_history(self, history):
+            pass
+        def __call__(self, history):
+            step = history.step[0]
+            value = history.value[0]
+            if step % 100 == 0:
+                print(f'  step {step}  nllf={value:.4f}', flush=True)
+                if progress_q is not None:
+                    progress_q.put({'step': step, 'nllf': value})
+
+    monitors = MonitorRunner(monitors=[_StdoutMonitor()], problem=problem)
+    _orig_stopping = monitors.stopping
+    monitors.stopping = lambda: _shutdown.is_set() or (abort_event is not None and abort_event.is_set()) or _orig_stopping()
     opts = {
         'samples':  fit_options.get('samples', 5000),
         'burn':     fit_options.get('burn', 1000),
@@ -405,6 +437,15 @@ def _run_dream(problem, fit_options: dict, fitter: Optional[DreamFit]) -> DreamF
     }
     fitter.solve(monitors, mapper=lambda p: list(map(problem.nllf, p)), **opts)
     return fitter
+
+
+async def _drain_progress(q: stdlib_queue.Queue, resp: web.StreamResponse) -> None:
+    """Write per-step progress JSON lines from the monitor queue to the stream response."""
+    while True:
+        item = await asyncio.to_thread(q.get)
+        if item is _QUEUE_DONE:
+            break
+        await resp.write((json.dumps(item) + '\n').encode())
 
 
 def _calc_qprofiles_sync(problem, draw_points: np.ndarray, calc_tdtldl, oversampling: int,
@@ -484,7 +525,7 @@ async def post_fit(request: web.Request) -> web.Response:
     """Run DreamFit + Q-profile calculation.
 
     Multipart fields:
-        problem                  — dill-serialised bumps FitProblem bytes
+        problem                  — bumps-serialised FitProblem JSON
         fit_options              — JSON object (samples, burn, pop, init, thin, alpha, steps)
         warm_start               — "true" or "false"
         calc_tdtldl              — JSON: list of M lists, each [T, dT, L, dL] as flat arrays
@@ -496,21 +537,18 @@ async def post_fit(request: web.Request) -> web.Response:
 
     async with state.job_lock:
         state.is_busy = True
+        stream_resp = None
         try:
             reader = await request.multipart()
             fields = {}
-            problem_bytes = None
 
             async for part in reader:
-                if part.name == 'problem':
-                    problem_bytes = await part.read()
-                else:
-                    fields[part.name] = (await part.read()).decode()
+                fields[part.name] = (await part.read()).decode()
 
-            if problem_bytes is None:
+            if 'problem' not in fields:
                 return web.json_response({'error': 'missing problem field'}, status=400)
 
-            problem = dill.loads(problem_bytes)
+            problem = bumps_deserialize(json.loads(fields['problem']))
             fit_options = json.loads(fields.get('fit_options', '{}'))
             warm_start = fields.get('warm_start', 'false').lower() == 'true'
             oversampling = int(fields.get('oversampling', '11'))
@@ -528,9 +566,37 @@ async def post_fit(request: web.Request) -> web.Response:
             logger.info('Starting DreamFit (warm_start=%s, samples=%s)',
                         warm_start, fit_options.get('samples', 5000))
 
-            fitter = await asyncio.to_thread(
-                _run_dream, problem, fit_options, fitter_in
+            progress_q: stdlib_queue.Queue = stdlib_queue.Queue()
+            abort_event = state.abort_fit
+            abort_event.clear()
+
+            stream_resp = web.StreamResponse(
+                status=200,
+                headers={
+                    'Content-Type': 'application/octet-stream',
+                    'Content-Disposition': 'attachment; filename="fit_result.h5"',
+                },
             )
+            await stream_resp.prepare(request)
+
+            async def _run_and_signal() -> DreamFit:
+                result = await asyncio.to_thread(_run_dream, problem, fit_options, fitter_in, progress_q, abort_event)
+                progress_q.put(_QUEUE_DONE)
+                return result
+
+            dream_task = asyncio.create_task(_run_and_signal())
+            drain_task = asyncio.create_task(_drain_progress(progress_q, stream_resp))
+            try:
+                fitter = await dream_task
+                await drain_task
+            except Exception:
+                drain_task.cancel()
+                try:
+                    await drain_task
+                except (asyncio.CancelledError, Exception):
+                    pass
+                raise
+
             state.fitter = fitter
             dream_state = fitter.state
 
@@ -549,15 +615,21 @@ async def post_fit(request: web.Request) -> web.Response:
             )
 
             logger.info('Returning HDF5 (%d bytes)', len(hdf5_bytes))
-            return web.Response(
-                body=hdf5_bytes,
-                content_type='application/x-hdf5',
-                headers={'Content-Disposition': 'attachment; filename="fit_result.h5"'},
-            )
+            await stream_resp.write(b'__HDF5__\n')
+            await stream_resp.write(hdf5_bytes)
+            await stream_resp.write_eof()
+            return stream_resp
 
         except Exception as e:
             logger.exception('Fit failed: %s', e)
-            return web.json_response({'error': str(e)}, status=500)
+            if stream_resp is None:
+                return web.json_response({'error': str(e)}, status=500)
+            # Stream already prepared — close it; client sees truncated response
+            try:
+                await stream_resp.write_eof()
+            except Exception:
+                pass
+            return stream_resp
         finally:
             state.is_busy = False
 
@@ -570,7 +642,7 @@ async def post_qprofiles(request: web.Request) -> web.Response:
     without running DREAM.
 
     Multipart fields:
-        problem      — dill-serialised bumps FitProblem bytes
+        problem      — bumps-serialised FitProblem JSON
         draw_points  — JSON: 2-D array (npoints × npars)
         calc_tdtldl  — JSON: list of M lists, each [T, dT, L, dL] as flat arrays
         oversampling — integer string
@@ -579,18 +651,14 @@ async def post_qprofiles(request: web.Request) -> web.Response:
     try:
         reader = await request.multipart()
         fields = {}
-        problem_bytes = None
 
         async for part in reader:
-            if part.name == 'problem':
-                problem_bytes = await part.read()
-            else:
-                fields[part.name] = (await part.read()).decode()
+            fields[part.name] = (await part.read()).decode()
 
-        if problem_bytes is None:
+        if 'problem' not in fields:
             return web.json_response({'error': 'missing problem field'}, status=400)
 
-        problem = dill.loads(problem_bytes)
+        problem = bumps_deserialize(json.loads(fields['problem']))
         draw_points = np.array(json.loads(fields['draw_points']))
         oversampling = int(fields.get('oversampling', '11'))
         resolution = fields.get('resolution', 'normal')
@@ -652,4 +720,10 @@ if __name__ == '__main__':
     parser.add_argument('--host', default='0.0.0.0')
     parser.add_argument('--port', type=int, default=5031)
     args = parser.parse_args()
+
+    def _handle_sigint(sig, frame):
+        print('\nfit server: interrupt received, aborting fit...', flush=True)
+        _shutdown.set()
+
+    signal.signal(signal.SIGINT, _handle_sigint)
     web.run_app(build_app(), host=args.host, port=args.port)

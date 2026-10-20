@@ -1,6 +1,7 @@
 import asyncio
 import copy
 import time
+import dill
 import numpy as np
 from typing import Tuple, Union, List, Optional, TYPE_CHECKING
 from threading import Event, Semaphore
@@ -177,7 +178,7 @@ class AutoReflBase(object):
             self._ready = False
 
         calcmodel = copy.deepcopy(problem)
-        self.calcmodels: List[Union[Experiment, FitProblem]] = [calcmodel] if hasattr(calcmodel, 'fitness') else list(calcmodel.models)
+        self.calcmodels: List[Union[Experiment, FitProblem]] = list(calcmodel.models) if isinstance(calcmodel, FitProblem) else [calcmodel]
         if bestpars is not None:
             calcmodel.setp(bestpars)
 
@@ -364,7 +365,7 @@ class AutoReflBase(object):
         qprofs = [np.array([r[i] for r in res]) for i in range(self.nmodels)]
         return qprofs
 
-    async def fit_step(self, client: "FitClient", warm_start: bool = False) -> None:
+    async def fit_step(self, client: "FitClient", warm_start: bool = False, progress_callback=None) -> None:
         """Run DREAM fit + Q-profile calculation on the remote fit server.
 
         Pass warm_start=False on the first call (cold start with lhs init).
@@ -410,13 +411,15 @@ class AutoReflBase(object):
             resolution=self.instrument.resolution,
             warm_start=warm_start,
             requested_derived_labels=requested_derived,
+            progress_callback=progress_callback,
         )
 
         # Re-resolve sel in case the parameter vector changed since __init__
         self.sel = self._resolve_sel()
 
         step = self.steps[-1]
-        step.chain_pop = fit_fields['chains'][-1, :, :]
+        chains = fit_fields['chains']
+        step.chain_pop = chains[-1, :, :] if chains.ndim == 3 and chains.shape[0] > 0 else None
         self.restart_pop = step.chain_pop
         native_draw_pts = fit_fields['draw_points']
 
@@ -866,7 +869,8 @@ class AutoReflBase(object):
                     # calculate fom and average time (shape X)
                     fom = np.sum(dHdt, axis=1)
                     meas_time = 1. / np.sum(1. / np.reshape(meastime_meas, init_shape), axis=1)
-                    bkg_meas_time = 1. / np.sum(1. / np.reshape(bkg_meastime, init_shape), axis=1)
+                    with np.errstate(divide='ignore', invalid='ignore'):
+                        bkg_meas_time = 1. / np.sum(1. / np.reshape(bkg_meastime, init_shape), axis=1)
 
                 Hlist.append(Hs)
                 foms.append(fom)
