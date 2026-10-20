@@ -1,0 +1,18 @@
+background D2O 5.00142085032994e-07
+intensity 0.945167031125566
+sample broadening 0.00178190948969606
+theta offset -0.00545142749657496
+substrate roughness 3.68479746917645
+siox rho 4.4264951343103
+silicon oxide layer thickness 5.07404432044719
+tiox rho 2.27114431348236
+bilayer bilayer roughness 5.07198339942419
+bilayer inner acyl chain thickness 14.1732458356888
+bilayer outer acyl chain thickness 11.5677607528134
+bilayer submembrane thickness 13.6510892170351
+bilayer volume fraction bilayer 0.946097354412749
+d2o rho 5.96106991311691
+titanium oxide roughness 3.85868986913993
+background H2O 4.1158255912117e-06
+h2o rho -0.365514818084623
+titanium oxide layer thickness 137.854399249028
