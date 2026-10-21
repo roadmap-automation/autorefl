@@ -20,7 +20,6 @@ from typing import List, Optional, Tuple
 import concurrent.futures
 import multiprocessing
 import multiprocessing.managers
-import signal
 import threading
 
 _shutdown = threading.Event()
@@ -427,7 +426,7 @@ def _run_dream(problem, fit_options: dict, fitter: Optional[DreamFit],
     if fitter is None or fitter.state is None:
         fitter = DreamFit(problem)
     else:
-        # Re-attach to new problem object (deserialized each call)
+        # Re-attach to new problem object (deserialized each call).
         fitter.problem = problem
 
     class _StdoutMonitor:
@@ -440,6 +439,10 @@ def _run_dream(problem, fit_options: dict, fitter: Optional[DreamFit],
                 print(f'  step {step}  nllf={value:.4f}', flush=True)
                 if progress_q is not None:
                     progress_q.put({'step': step, 'nllf': value})
+
+    # Diagnostic: confirm the problem has data and a sane nllf before DREAM starts.
+    _nllf_pre = problem.nllf()
+    print(f'  [diag] pre-DREAM nllf={_nllf_pre:.4f}  npars={len(problem.getp())}', flush=True)
 
     monitors = MonitorRunner(monitors=[_StdoutMonitor()], problem=problem)
     _orig_stopping = monitors.stopping
@@ -465,6 +468,11 @@ def _run_dream(problem, fit_options: dict, fitter: Optional[DreamFit],
             fitter.solve(monitors, mapper=lambda pop: list(pool.map(_dream_nllf_worker, pop)), **opts)
     else:
         fitter.solve(monitors, mapper=lambda p: list(map(problem.nllf, p)), **opts)
+
+    # Diagnostic: verify best_x gives the expected nllf when evaluated directly.
+    _best_x, _best_logp = fitter.state.best()
+    _nllf_at_best = problem.nllf(_best_x)
+    print(f'  [diag] post-DREAM best_logp={_best_logp:.4f}  nllf_at_best_x={_nllf_at_best:.4f}', flush=True)
     return fitter
 
 
@@ -755,9 +763,4 @@ if __name__ == '__main__':
     parser.add_argument('--port', type=int, default=5031)
     args = parser.parse_args()
 
-    def _handle_sigint(sig, frame):
-        print('\nfit server: interrupt received, aborting fit...', flush=True)
-        _shutdown.set()
-
-    signal.signal(signal.SIGINT, _handle_sigint)
     web.run_app(build_app(), host=args.host, port=args.port)

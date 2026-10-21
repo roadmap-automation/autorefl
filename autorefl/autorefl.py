@@ -387,13 +387,14 @@ class AutoReflBase(object):
 
         self.update_models()
 
+        _steps = self.fit_options.get('steps', 0)
         fit_options = {
-            'samples': self.fit_options.get('steps', 500) * self.fit_options.get('pop', 10),
+            'samples': self.fit_options.get('samples', _steps * self.fit_options.get('pop', 10)),
             'burn':    self.fit_options.get('burn', 1000),
             'pop':     self.fit_options.get('pop', 10),
             'init':    self.fit_options.get('init', 'lhs'),
             'alpha':   self.fit_options.get('alpha', 0.001),
-            'steps':   0,
+            'steps':   _steps,
         }
         calc_tdtldl = [self.instrument.Q2TdTLdL(mQ, mx, mQ) for mQ, mx in zip(self.measQ, self.x)]
 
