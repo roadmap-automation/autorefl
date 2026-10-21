@@ -38,6 +38,25 @@ from .simulation import calc_expected_R
 
 logger = logging.getLogger(__name__)
 
+# Number of parallel workers for DREAM nllf evaluation.
+# Reads SLURM_CPUS_PER_TASK if set, otherwise falls back to os.cpu_count().
+import os as _os
+N_WORKERS: int = int(_os.environ.get('SLURM_CPUS_PER_TASK', None) or _os.cpu_count() or 1)
+
+
+# ── DREAM parallel nllf worker ────────────────────────────────────────────────────────
+
+_dream_problem = None  # set per-worker by _dream_init
+
+
+def _dream_init(problem_bytes: bytes) -> None:
+    global _dream_problem
+    _dream_problem = dill.loads(problem_bytes)
+
+
+def _dream_nllf_worker(params) -> float:
+    return _dream_problem.nllf(params)
+
 
 # ── Q-profile + derived worker (module level so ProcessPoolExecutor can pickle it) ────
 
@@ -398,7 +417,8 @@ async def post_derived_draws(request: web.Request) -> web.Response:
 
 def _run_dream(problem, fit_options: dict, fitter: Optional[DreamFit],
                progress_q: Optional[stdlib_queue.Queue] = None,
-               abort_event: Optional[threading.Event] = None) -> DreamFit:
+               abort_event: Optional[threading.Event] = None,
+               n_workers: int = 1) -> DreamFit:
     """Synchronous DreamFit run. Intended to be called in a thread.
 
     Pass an existing fitter for warm-start (its state is resumed); pass None
@@ -435,7 +455,16 @@ def _run_dream(problem, fit_options: dict, fitter: Optional[DreamFit],
         'trim':     fit_options.get('trim', True),
         'steps':    fit_options.get('steps', 0),
     }
-    fitter.solve(monitors, mapper=lambda p: list(map(problem.nllf, p)), **opts)
+    if n_workers > 1:
+        problem_bytes = dill.dumps(problem)
+        with concurrent.futures.ProcessPoolExecutor(
+            max_workers=n_workers,
+            initializer=_dream_init,
+            initargs=(problem_bytes,),
+        ) as pool:
+            fitter.solve(monitors, mapper=lambda pop: list(pool.map(_dream_nllf_worker, pop)), **opts)
+    else:
+        fitter.solve(monitors, mapper=lambda p: list(map(problem.nllf, p)), **opts)
     return fitter
 
 
@@ -581,7 +610,10 @@ async def post_fit(request: web.Request) -> web.Response:
 
             async def _run_and_signal() -> DreamFit:
                 try:
-                    return await asyncio.to_thread(_run_dream, problem, fit_options, fitter_in, progress_q, abort_event)
+                    return await asyncio.to_thread(
+                        _run_dream, problem, fit_options, fitter_in,
+                        progress_q, abort_event, N_WORKERS,
+                    )
                 finally:
                     progress_q.put(_QUEUE_DONE)  # unblock drain even on cancellation
 
