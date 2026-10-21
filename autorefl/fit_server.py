@@ -15,7 +15,7 @@ import json
 import logging
 import queue as stdlib_queue
 from dataclasses import dataclass, field
-from typing import List, Optional, Tuple
+from typing import Any, List, Optional, Tuple
 
 import concurrent.futures
 import multiprocessing
@@ -45,22 +45,33 @@ N_WORKERS: int = int(_os.environ.get('SLURM_CPUS_PER_TASK', None) or _os.cpu_cou
 
 # ── DREAM parallel nllf worker ────────────────────────────────────────────────────────
 
-_dream_problem = None  # set per-worker by _dream_init
+_dream_problem = None    # per-worker; loaded lazily on first call of each generation
+_dream_generation = -1   # per-worker local generation counter
+_dream_shared_ns = None  # proxy to manager Namespace; set by _dream_env_init
 
 
-def _dream_init(problem_bytes: bytes) -> None:
-    # Each worker must use exactly one thread for BLAS/OpenMP so that
-    # N_WORKERS processes map cleanly onto N_WORKERS SLURM cores without
-    # over-subscribing.  Set before dill.loads to avoid MKL re-init.
+def _dream_env_init(shared_ns) -> None:
+    """Pool initializer: set thread limits and capture shared namespace reference.
+
+    Each worker must use exactly one thread for BLAS/OpenMP so that N_WORKERS
+    processes map cleanly onto N_WORKERS SLURM cores without over-subscribing.
+    Set before any dill.loads to avoid MKL re-init.
+    """
     import os as _worker_os
     _worker_os.environ['MKL_NUM_THREADS'] = '1'
     _worker_os.environ['OMP_NUM_THREADS'] = '1'
     _worker_os.environ['OPENBLAS_NUM_THREADS'] = '1'
-    global _dream_problem
-    _dream_problem = dill.loads(problem_bytes)
+    global _dream_shared_ns, _dream_generation
+    _dream_shared_ns = shared_ns
+    _dream_generation = -1
 
 
 def _dream_nllf_worker(params) -> float:
+    global _dream_problem, _dream_generation
+    gen = _dream_shared_ns.generation
+    if gen != _dream_generation:
+        _dream_problem = dill.loads(bytes(_dream_shared_ns.problem_bytes))
+        _dream_generation = gen
     return _dream_problem.nllf(params)
 
 
@@ -276,6 +287,8 @@ class ServerState:
     is_busy: bool = False
     fitter: Optional[DreamFit] = None   # retained between calls for warm-start
     mp_manager: Optional[multiprocessing.managers.SyncManager] = None
+    dream_pool: Optional[concurrent.futures.ProcessPoolExecutor] = None
+    dream_shared: Any = None  # manager.Namespace proxy: .generation (int) + .problem_bytes (bytes)
     # populated by /setup, cleared by /reset
     derived_labels: List[str] = field(default_factory=list)
     derived_prior_scales: np.ndarray = field(default_factory=lambda: np.array([]))
@@ -424,7 +437,8 @@ async def post_derived_draws(request: web.Request) -> web.Response:
 def _run_dream(problem, fit_options: dict, fitter: Optional[DreamFit],
                progress_q: Optional[stdlib_queue.Queue] = None,
                abort_event: Optional[threading.Event] = None,
-               n_workers: int = 1) -> DreamFit:
+               pool: Optional[concurrent.futures.ProcessPoolExecutor] = None,
+               shared: Any = None) -> DreamFit:
     """Synchronous DreamFit run. Intended to be called in a thread.
 
     Pass an existing fitter for warm-start (its state is resumed); pass None
@@ -465,14 +479,10 @@ def _run_dream(problem, fit_options: dict, fitter: Optional[DreamFit],
         'trim':     fit_options.get('trim', True),
         'steps':    fit_options.get('steps', 0),
     }
-    if n_workers > 1:
-        problem_bytes = dill.dumps(problem)
-        with concurrent.futures.ProcessPoolExecutor(
-            max_workers=n_workers,
-            initializer=_dream_init,
-            initargs=(problem_bytes,),
-        ) as pool:
-            fitter.solve(monitors, mapper=lambda pop: list(pool.map(_dream_nllf_worker, pop)), **opts)
+    if pool is not None:
+        shared.problem_bytes = dill.dumps(problem)
+        shared.generation += 1
+        fitter.solve(monitors, mapper=lambda pop: list(pool.map(_dream_nllf_worker, pop)), **opts)
     else:
         fitter.solve(monitors, mapper=lambda p: list(map(problem.nllf, p)), **opts)
 
@@ -627,7 +637,7 @@ async def post_fit(request: web.Request) -> web.Response:
                 try:
                     return await asyncio.to_thread(
                         _run_dream, problem, fit_options, fitter_in,
-                        progress_q, abort_event, N_WORKERS,
+                        progress_q, abort_event, state.dream_pool, state.dream_shared,
                     )
                 finally:
                     progress_q.put(_QUEUE_DONE)  # unblock drain even on cancellation
@@ -744,11 +754,24 @@ async def _on_startup(app: web.Application) -> None:
     state: ServerState = app['state']
     state.mp_manager = multiprocessing.Manager()
     logger.info('Multiprocessing manager started')
+    state.dream_shared = state.mp_manager.Namespace()
+    state.dream_shared.generation = 0
+    state.dream_shared.problem_bytes = b''
+    if N_WORKERS > 1:
+        state.dream_pool = concurrent.futures.ProcessPoolExecutor(
+            max_workers=N_WORKERS,
+            initializer=_dream_env_init,
+            initargs=(state.dream_shared,),
+        )
+        logger.info('DREAM process pool started (%d workers)', N_WORKERS)
 
 
 async def _on_cleanup(app: web.Application) -> None:
     _shutdown.set()  # stop any DREAM thread still running after server shutdown
     state: ServerState = app['state']
+    if state.dream_pool is not None:
+        state.dream_pool.shutdown(wait=False)
+        logger.info('DREAM process pool shut down')
     if state.mp_manager is not None:
         state.mp_manager.shutdown()
         logger.info('Multiprocessing manager shut down')
