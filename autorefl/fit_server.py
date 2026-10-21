@@ -49,6 +49,13 @@ _dream_problem = None  # set per-worker by _dream_init
 
 
 def _dream_init(problem_bytes: bytes) -> None:
+    # Each worker must use exactly one thread for BLAS/OpenMP so that
+    # N_WORKERS processes map cleanly onto N_WORKERS SLURM cores without
+    # over-subscribing.  Set before dill.loads to avoid MKL re-init.
+    import os as _worker_os
+    _worker_os.environ['MKL_NUM_THREADS'] = '1'
+    _worker_os.environ['OMP_NUM_THREADS'] = '1'
+    _worker_os.environ['OPENBLAS_NUM_THREADS'] = '1'
     global _dream_problem
     _dream_problem = dill.loads(problem_bytes)
 
