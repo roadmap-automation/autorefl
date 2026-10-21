@@ -144,6 +144,7 @@ class ExperimentStep(object):
         self.qbkgs: Union[List[np.ndarray], None] = None
         self.best_logp: Union[float, None] = None
         self.final_chisq: Union[str, None] = None
+        self.final_chisq_value: Union[float, None] = None  # reduced chi-squared as a plain float
         self.draw_pts: Union[np.ndarray, None] = None
         self.draw_logp: Union[np.ndarray, None] = None
         self.chain_pop: Union[np.ndarray, None] = None

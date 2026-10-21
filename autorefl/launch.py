@@ -105,7 +105,19 @@ class AutoReflLauncher:
             print('AutoLauncher: no intensity calibration provided, using simulation fallback')
 
         print('AutoLauncher: calculating initial points')
-        points, init_qprofs = await self.exp.initial_points(self.client)
+        points, init_qprofs, init_step = await self.exp.initial_points(self.client)
+
+        try:
+            await emit_history('autorefl_profiles', self.update_plot_profiles(init_qprofs))
+            if init_step.foms is not None:
+                fom_data = [
+                    {'model': m, 'x': list(self.exp.x[m]), 'fom': list(fom.tolist())}
+                    for m, fom in enumerate(init_step.foms)
+                ]
+                await emit_history('autorefl_fom', json.dumps(fom_data))
+        except Exception:
+            import traceback
+            traceback.print_exc()
 
         total_t = 0.0
         k = 0
@@ -136,8 +148,8 @@ class AutoReflLauncher:
                     break
 
                 print('AutoLauncher: fitting data', flush=True)
-                def _fit_progress(step: int, nllf: float) -> None:
-                    asyncio.create_task(emit_history('fit_update', f'step {step}, nllf={nllf:.4f}'))
+                def _fit_progress(step: int, chisq: float) -> None:
+                    asyncio.create_task(emit_history('fit_update', f'step {step}, chisq={chisq:.4f}'))
                 await self.exp.fit_step(self.client, warm_start=warm_start, progress_callback=_fit_progress)
                 warm_start = True
 
@@ -151,7 +163,7 @@ class AutoReflLauncher:
                     await emit_history('autorefl_profiles', self.update_plot_profiles(step.qprofs))
                     await emit_history('autorefl_data', self.update_plot_data())
                     convergence = [
-                        {'step': i, 'dH': s.dH, 'dH_marg': s.dH_marg, 'chisq': s.final_chisq}
+                        {'step': i, 'dH': s.dH, 'dH_marg': s.dH_marg, 'chisq': s.final_chisq_value}
                         for i, s in enumerate(self.exp.steps)
                         if s.dH is not None
                     ]

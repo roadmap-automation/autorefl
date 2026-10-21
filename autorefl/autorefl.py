@@ -324,7 +324,7 @@ class AutoReflBase(object):
         initstep.qprofs = init_qprof
         points = self.take_step(initstep)
 
-        return points, init_qprof
+        return points, init_qprof, initstep
 
     def update_models(self) -> None:
         # Update the models in the fit problem with new data points. Should be run every time
@@ -435,6 +435,8 @@ class AutoReflBase(object):
         step.best_logp = fit_fields['best_logp']
         self.problem.setp(fit_fields['best_x'])
         step.final_chisq = self.problem.chisq_str()
+        _dof = self.problem.dof
+        step.final_chisq_value = float(self.problem.chisq() / _dof) if _dof > 0 else float(self.problem.chisq())
         step.H, _, _ = calc_entropy(native_draw_pts, select_pars=None, options=self.entropy_options)
         step.dH = self.init_entropy - step.H
         step.H_marg, _, _ = calc_entropy(step.draw_pts, select_pars=self.sel, options=self.entropy_options)
