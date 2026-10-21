@@ -62,6 +62,10 @@ class AutoReflLauncher:
     def stop(self) -> None:
         self._stop.set()
         self.backend.stop()
+        try:
+            asyncio.create_task(self.client.post_stop_fit())
+        except RuntimeError:
+            pass
         self.signals.global_start.set()
         self.signals.measurement_queue_updated.set()
         self.signals.first_measurement_complete.set()
@@ -136,6 +140,9 @@ class AutoReflLauncher:
                     asyncio.create_task(emit_history('fit_update', f'step {step}, nllf={nllf:.4f}'))
                 await self.exp.fit_step(self.client, warm_start=warm_start, progress_callback=_fit_progress)
                 warm_start = True
+
+                if self._stop.is_set():
+                    break
 
                 step = self.exp.steps[-1]
                 print('AutoLauncher: final chi-squared:', step.final_chisq, flush=True)

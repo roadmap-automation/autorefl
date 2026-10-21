@@ -580,9 +580,10 @@ async def post_fit(request: web.Request) -> web.Response:
             await stream_resp.prepare(request)
 
             async def _run_and_signal() -> DreamFit:
-                result = await asyncio.to_thread(_run_dream, problem, fit_options, fitter_in, progress_q, abort_event)
-                progress_q.put(_QUEUE_DONE)
-                return result
+                try:
+                    return await asyncio.to_thread(_run_dream, problem, fit_options, fitter_in, progress_q, abort_event)
+                finally:
+                    progress_q.put(_QUEUE_DONE)  # unblock drain even on cancellation
 
             dream_task = asyncio.create_task(_run_and_signal())
             drain_task = asyncio.create_task(_drain_progress(progress_q, stream_resp))
@@ -699,6 +700,7 @@ async def _on_startup(app: web.Application) -> None:
 
 
 async def _on_cleanup(app: web.Application) -> None:
+    _shutdown.set()  # stop any DREAM thread still running after server shutdown
     state: ServerState = app['state']
     if state.mp_manager is not None:
         state.mp_manager.shutdown()
