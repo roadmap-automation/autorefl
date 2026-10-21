@@ -457,9 +457,11 @@ def _run_dream(problem, fit_options: dict, fitter: Optional[DreamFit],
             step = history.step[0]
             value = history.value[0]
             if step % 100 == 0:
-                print(f'  step {step}  nllf={value:.4f}', flush=True)
+                _dof = problem.dof
+                chisq = 2 * value / _dof if _dof > 0 else 2 * value
+                print(f'  step {step}  chisq={chisq:.4f}', flush=True)
                 if progress_q is not None:
-                    progress_q.put({'step': step, 'nllf': value})
+                    progress_q.put({'step': step, 'chisq': chisq})
 
     # Diagnostic: confirm the problem has data and a sane nllf before DREAM starts.
     _nllf_pre = problem.nllf()
