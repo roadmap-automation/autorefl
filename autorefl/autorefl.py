@@ -48,6 +48,12 @@ class AutoReflBase(object):
     entropy_options -- dictionary of entropy options; default entropy.default_entropy_options
     oversampling -- integer oversampling value for calculating Refl1D models. Default 11; should be
                     > 1 for accurate simulations.
+    fit_oversampling -- if True (default), the full-range OversampledRegion is used for both
+                    simulation (calcmodels) and fitting (models sent to fit server).  Set to False
+                    to restrict the fit-server models to whatever oversampled_regions the user
+                    attached before constructing (e.g. probe.critical_edge()); the full-range region
+                    then applies only to simulation.  Useful for faster DREAM at the cost of slightly
+                    less accurate smearing outside the user-defined region.
     meas_bkg -- single float of list of M floats representing the measurement background level
                 (unsubtracted) for each model.
     startmodel -- integer index of starting model; default 0.
@@ -68,6 +74,7 @@ class AutoReflBase(object):
                        fit_options: dict = default_fit_options,
                        entropy_options: dict = default_entropy_options,
                        oversampling: int = 11,
+                       fit_oversampling: bool = True,
                        meas_bkg: Union[float, List[float]] = 1e-6,
                        startmodel: int = 0,
                        min_meas_time: float = 10.0,
@@ -107,6 +114,10 @@ class AutoReflBase(object):
                 self.measQ = Q
             else:
                 self.measQ = [Q for _ in range(self.nmodels)]
+
+        # Snapshot user-attached oversampled_regions before autorefl adds its own.
+        # Used below to restore fit-path models when fit_oversampling=False.
+        _user_regions = [list(m.probe.oversampled_regions) for m in self.models]
 
         # Replace random sub-point oversampling with a deterministic OversampledRegion
         # covering the full measurement Q range.  n = oversampling * len(measQ) gives
@@ -195,6 +206,17 @@ class AutoReflBase(object):
         self.calcmodels: List[Union[Experiment, FitProblem]] = list(calcmodel.models) if isinstance(calcmodel, FitProblem) else [calcmodel]
         if bestpars is not None:
             calcmodel.setp(bestpars)
+
+        # When fit_oversampling=False, strip the full-range region from the fit-path models
+        # (self.models → self.problem → serialized to fit server) and restore only the
+        # user-attached regions captured before __init__ modified them.  calcmodels (used
+        # only for simulation) retain the full-range region via the deepcopy above.
+        # Set fit_oversampling=True to restore the original dense-everywhere behaviour.
+        if not fit_oversampling and oversampling is not None:
+            for m, user_regions in zip(self.models, _user_regions):
+                m.probe.oversampled_regions = user_regions
+                m.probe._apply_oversamplings()
+                m.update()
 
         # add residual background
         self.resid_bkg: np.ndarray = np.array([c.probe.background.value for c in self.calcmodels])
@@ -1099,15 +1121,16 @@ class AutoReflExperiment(AutoReflBase):
                        fit_options: dict = default_fit_options,
                        entropy_options: dict = default_entropy_options,
                        oversampling: int = 11,
+                       fit_oversampling: bool = True,
                        meas_bkg: Union[float, List[float]] = 1e-6,
                        startmodel: int = 0,
                        min_meas_time: float = 10.0,
                        select_pars: Union[list, None] = None,
                        bestpars: Union[np.ndarray, list, None] = None) -> None:
-        
+
         super().__init__(problem, Q, instrument, eta, npoints, switch_penalty,
                        switch_time_penalty, fit_options, entropy_options, oversampling,
-                       meas_bkg, startmodel, min_meas_time, select_pars, bestpars)
+                       fit_oversampling, meas_bkg, startmodel, min_meas_time, select_pars, bestpars)
 
         self.filename = filename
 
