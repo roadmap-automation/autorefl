@@ -120,7 +120,7 @@ class FitClient:
         warm_start: bool = False,
         requested_derived_labels: List[str] = [],
         timeout_s: float = 7200.0,
-        progress_callback: Optional[Callable[[int, float], None]] = None,
+        progress_callback: Optional[Callable[[int, str], None]] = None,
     ) -> Tuple[dict, List[np.ndarray]]:
         """Run DREAM fit + Q-profile calculation on the remote server.
 

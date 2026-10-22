@@ -146,8 +146,8 @@ class AutoReflLauncher:
                     break
 
                 print('AutoLauncher: fitting data', flush=True)
-                def _fit_progress(step: int, chisq: float) -> None:
-                    asyncio.create_task(emit_history('fit_update', f'step {step}, chisq={chisq:.4f}'))
+                def _fit_progress(step: int, chisq: str) -> None:
+                    asyncio.create_task(emit_history('fit_update', f'step {step}, chisq={chisq}'))
                 await self.exp.fit_step(self.client, warm_start=warm_start, progress_callback=_fit_progress)
                 warm_start = True
 
