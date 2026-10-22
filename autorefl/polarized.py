@@ -119,7 +119,7 @@ class PolarizedAutoReflExperiment(AutoReflExperiment):
             mQ = spec.Qz
             mdQ = spec.dQ
             xs_probe._set_TLR(mT, mdT * _FWHM, mL, mdL * _FWHM, mR, mdR, dQ=mdQ)
-            xs_probe.oversample(self.oversampling)
+            xs_probe._apply_oversamplings()
             xs_probe.resolution = self.instrument.resolution
 
         experiment.update()
@@ -204,7 +204,7 @@ class PolarizedSimReflExperiment(SimReflExperiment):
             mQ = spec.Qz
             mdQ = spec.dQ
             xs_probe._set_TLR(mT, mdT * _FWHM, mL, mdL * _FWHM, mR, mdR, dQ=mdQ)
-            xs_probe.oversample(self.oversampling)
+            xs_probe._apply_oversamplings()
             xs_probe.resolution = self.instrument.resolution
 
         experiment.update()

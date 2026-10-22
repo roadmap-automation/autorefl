@@ -608,6 +608,14 @@ async def post_fit(request: web.Request) -> web.Response:
             fit_options = json.loads(fields.get('fit_options', '{}'))
             warm_start = fields.get('warm_start', 'false').lower() == 'true'
             oversampling = int(fields.get('oversampling', '11'))
+
+            # probe._calc_Q (the oversampled sub-point grid) is a dynamic attribute
+            # that does not survive bumps serialization. Re-apply it now so DREAM
+            # evaluates reflectivity on the same dense calc_Q grid that was used
+            # during simulation.
+            for m in problem.models:
+                m.probe._apply_oversamplings()
+                m.update()
             resolution = fields.get('resolution', 'normal')
             requested_derived_labels = json.loads(fields.get('requested_derived_labels', '[]'))
 

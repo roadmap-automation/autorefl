@@ -31,10 +31,11 @@ def calc_expected_R(fitness, T, dT, L, dL, oversampling=None, resolution='normal
     # currently requires sorted values (by Q) because it returns sorted values.
     # this will need to be modified for CANDOR.
     # dT and dL arrive in 1-sigma (reductus convention); refl1d _set_TLR expects FWHM.
+    # oversampling is accepted for API compatibility but ignored: calc_Q is driven by
+    # probe.oversampled_regions (set in AutoReflBase.__init__) so that per-Q simulation
+    # and batch fitting use the same deterministic quadrature nodes.
     fitness.probe._set_TLR(T, dT * _FWHM, L, dL * _FWHM, R=None, dR=None, dQ=None)
     fitness.probe.resolution = resolution
-    if oversampling is not None:
-        fitness.probe.oversampling = oversampling
     fitness.probe._apply_oversamplings()
     fitness.update()
     return fitness.reflectivity()[1]

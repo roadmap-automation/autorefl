@@ -10,6 +10,7 @@ from queue import Queue
 from bumps.initpop import generate
 
 from refl1d.names import FitProblem, Experiment
+from refl1d.probe.probe import OversampledRegion
 from scipy.interpolate import interp1d
 
 # local imports
@@ -90,10 +91,6 @@ class AutoReflBase(object):
         self.nmodels = len(models)
         self.curmodel = startmodel
         self.oversampling = oversampling
-        for m in self.models:
-            m.probe.oversample(oversampling)
-            m.probe.resolution = self.instrument.resolution
-            m.update()
 
         # Condition Q vector to a list of arrays, one for each model
         if isinstance(Q, np.ndarray):
@@ -110,6 +107,22 @@ class AutoReflBase(object):
                 self.measQ = Q
             else:
                 self.measQ = [Q for _ in range(self.nmodels)]
+
+        # Replace random sub-point oversampling with a deterministic OversampledRegion
+        # covering the full measurement Q range.  n = oversampling * len(measQ) gives
+        # roughly the same calc_Q density as the old approach, but consistently for
+        # both per-Q simulation (calc_expected_R) and batch fitting (update_models).
+        # += preserves any regions the user already attached to the probe (e.g. via
+        # probe.critical_edge()) before passing the problem in.
+        for m, mQ in zip(self.models, self.measQ):
+            m.probe.oversampling = None
+            m.probe.oversampled_regions += [OversampledRegion(
+                Q_start=float(np.min(mQ)), Q_end=float(np.max(mQ)),
+                n=oversampling * len(mQ),
+            )]
+            m.probe._apply_oversamplings()
+            m.probe.resolution = self.instrument.resolution
+            m.update()
 
         # define measurement space. Contains same number of points per model as self.measQ
         # measurement space is instrument specific (e.g. for MAGIK x=Q but for polychromatic
