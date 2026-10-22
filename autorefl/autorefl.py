@@ -116,10 +116,11 @@ class AutoReflBase(object):
         # probe.critical_edge()) before passing the problem in.
         for m, mQ in zip(self.models, self.measQ):
             m.probe.oversampling = None
-            m.probe.oversampled_regions += [OversampledRegion(
-                Q_start=float(np.min(mQ)), Q_end=float(np.max(mQ)),
-                n=oversampling * len(mQ),
-            )]
+            if oversampling is not None:
+                m.probe.oversampled_regions += [OversampledRegion(
+                    Q_start=float(np.min(mQ)), Q_end=float(np.max(mQ)),
+                    n=oversampling * len(mQ),
+                )]
             m.probe._apply_oversamplings()
             m.probe.resolution = self.instrument.resolution
             m.update()

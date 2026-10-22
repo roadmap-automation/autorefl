@@ -105,7 +105,6 @@ def _qprof_worker(point):
 
     qprof = [
         calc_expected_R(m, *newvar,
-                        oversampling=_qprof_problem.oversampling,
                         resolution=_qprof_problem.resolution)
         for m, newvar in zip(mlist, _qprof_problem.calcTdTLdL)
     ]
@@ -504,7 +503,7 @@ async def _drain_progress(q: stdlib_queue.Queue, resp: web.StreamResponse) -> No
         await resp.write((json.dumps(item) + '\n').encode())
 
 
-def _calc_qprofiles_sync(problem, draw_points: np.ndarray, calc_tdtldl, oversampling: int,
+def _calc_qprofiles_sync(problem, draw_points: np.ndarray, calc_tdtldl,
                          resolution: str, manager,
                          requested_derived_labels: List[str] = []) -> Tuple[list, np.ndarray]:
     """Q-profile (and optionally derived quantity) calculation via ProcessPoolExecutor.
@@ -514,7 +513,6 @@ def _calc_qprofiles_sync(problem, draw_points: np.ndarray, calc_tdtldl, oversamp
         derived_arr — (ndraw, D) array; empty if requested_derived_labels is []
     """
     setattr(problem, 'calcTdTLdL', calc_tdtldl)
-    setattr(problem, 'oversampling', oversampling)
     setattr(problem, 'resolution', resolution)
 
     molgroups_index = next(
@@ -585,7 +583,6 @@ async def post_fit(request: web.Request) -> web.Response:
         fit_options              — JSON object (samples, burn, pop, init, thin, alpha, steps)
         warm_start               — "true" or "false"
         calc_tdtldl              — JSON: list of M lists, each [T, dT, L, dL] as flat arrays
-        oversampling             — integer string
         resolution               — "normal" or "uniform"
         requested_derived_labels — JSON: list[str] of derived labels to compute (optional)
     """
@@ -607,7 +604,6 @@ async def post_fit(request: web.Request) -> web.Response:
             problem = bumps_deserialize(json.loads(fields['problem']))
             fit_options = json.loads(fields.get('fit_options', '{}'))
             warm_start = fields.get('warm_start', 'false').lower() == 'true'
-            oversampling = int(fields.get('oversampling', '11'))
 
             # probe._calc_Q (the oversampled sub-point grid) is a dynamic attribute
             # that does not survive bumps serialization. Re-apply it now so DREAM
@@ -674,7 +670,7 @@ async def post_fit(request: web.Request) -> web.Response:
 
             qprofs, derived_arr = await asyncio.to_thread(
                 _calc_qprofiles_sync, problem, dream_state.draw().points,
-                calc_tdtldl, oversampling, resolution, state.mp_manager,
+                calc_tdtldl, resolution, state.mp_manager,
                 requested_derived_labels,
             )
 
@@ -713,7 +709,6 @@ async def post_qprofiles(request: web.Request) -> web.Response:
         problem      — bumps-serialised FitProblem JSON
         draw_points  — JSON: 2-D array (npoints × npars)
         calc_tdtldl  — JSON: list of M lists, each [T, dT, L, dL] as flat arrays
-        oversampling — integer string
         resolution   — "normal" or "uniform"
     """
     try:
@@ -728,7 +723,6 @@ async def post_qprofiles(request: web.Request) -> web.Response:
 
         problem = bumps_deserialize(json.loads(fields['problem']))
         draw_points = np.array(json.loads(fields['draw_points']))
-        oversampling = int(fields.get('oversampling', '11'))
         resolution = fields.get('resolution', 'normal')
 
         raw_coords = json.loads(fields.get('calc_tdtldl', '[]'))
@@ -739,7 +733,7 @@ async def post_qprofiles(request: web.Request) -> web.Response:
 
         state: ServerState = request.app['state']
         qprofs, _ = await asyncio.to_thread(
-            _calc_qprofiles_sync, problem, draw_points, calc_tdtldl, oversampling, resolution, state.mp_manager
+            _calc_qprofiles_sync, problem, draw_points, calc_tdtldl, resolution, state.mp_manager
         )
 
         buf = io.BytesIO()
