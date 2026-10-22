@@ -17,6 +17,8 @@
             $("#queue_text").empty();
             reset_plotdata()
             Plotly.purge('plot')
+            Plotly.purge('plot_convergence')
+            Plotly.purge('plot_fom')
             new_step('init', 'Initialization')
         }
 
@@ -234,13 +236,20 @@
         })
 
         socket.on("autorefl_fom", data => {
-            const foms = JSON.parse(data)
-            Plotly.react('plot_fom', foms.map((f, idx) => ({
-                x: f.x, y: f.fom,
-                name: 'model ' + f.model,
-                line: {color: CB_color_cycle[idx % CB_color_cycle.length]},
-                mode: 'lines', type: 'scatter'
-            })), {
+            const all_steps = JSON.parse(data)  // list of forecast steps; each step is list of models
+            const nsteps = all_steps.length
+            const traces = all_steps.flatMap((step_foms, s) =>
+                step_foms.map((f, idx) => ({
+                    x: f.x, y: f.fom,
+                    name: 'model ' + f.model,
+                    legendgroup: 'model' + f.model,
+                    showlegend: s === 0,
+                    opacity: nsteps > 1 ? 1.0 - (s / (nsteps - 1)) * 0.75 : 1.0,
+                    line: {color: CB_color_cycle[idx % CB_color_cycle.length]},
+                    mode: 'lines', type: 'scatter'
+                }))
+            )
+            Plotly.react('plot_fom', traces, {
                 xaxis: {title: {text: 'x'}},
                 yaxis: {title: {text: 'FOM'}},
                 legend: {orientation: 'h', y: 1.15},

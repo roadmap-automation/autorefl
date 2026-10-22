@@ -8,7 +8,7 @@ import time
 import numpy as np
 
 from autorefl.remote.nicedata import Signaller
-from autorefl.remote.monitor import SocketServer, buttonhandler, emit_history
+from autorefl.remote.monitor import SocketServer, buttonhandler, emit_history, emit_clear
 from autorefl.backend import MeasurementBackend
 
 from autorefl.autorefl import AutoReflExperiment
@@ -107,14 +107,12 @@ class AutoReflLauncher:
         print('AutoLauncher: calculating initial points')
         points, init_qprofs, init_step = await self.exp.initial_points(self.client)
 
+        await emit_clear()
+
         try:
             await emit_history('autorefl_profiles', self.update_plot_profiles(init_qprofs))
-            if init_step.foms is not None:
-                fom_data = [
-                    {'model': m, 'x': list(self.exp.x[m]), 'fom': list(fom.tolist())}
-                    for m, fom in enumerate(init_step.foms)
-                ]
-                await emit_history('autorefl_fom', json.dumps(fom_data))
+            if init_step.all_foms is not None:
+                await emit_history('autorefl_fom', self._fom_payload(init_step.all_foms))
         except Exception:
             import traceback
             traceback.print_exc()
@@ -177,12 +175,8 @@ class AutoReflLauncher:
 
                 step = self.exp.steps[-1]
                 try:
-                    if step.foms is not None:
-                        fom_data = [
-                            {'model': m, 'x': list(self.exp.x[m]), 'fom': list(fom.tolist())}
-                            for m, fom in enumerate(step.foms)
-                        ]
-                        await emit_history('autorefl_fom', json.dumps(fom_data))
+                    if step.all_foms is not None:
+                        await emit_history('autorefl_fom', self._fom_payload(step.all_foms))
                 except Exception:
                     import traceback
                     traceback.print_exc()
@@ -203,6 +197,20 @@ class AutoReflLauncher:
                 await socket_task
             except asyncio.CancelledError:
                 pass
+
+    def _fom_payload(self, all_foms) -> str:
+        """Serialise all forecast-step FOMs for the autorefl_fom event.
+
+        Returns a JSON list-of-lists: outer index = forecast step (0 = next
+        measurement), inner index = model.  Each entry has model, x, fom, step.
+        """
+        return json.dumps([
+            [
+                {'model': m, 'x': list(self.exp.x[m]), 'fom': list(fom.tolist()), 'step': s}
+                for m, fom in enumerate(step_foms)
+            ]
+            for s, step_foms in enumerate(all_foms)
+        ])
 
     def update_plot_data(self) -> str:
         from autorefl.reduction import reduce

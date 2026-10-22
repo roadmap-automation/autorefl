@@ -31,6 +31,11 @@ async def emit_history(event, data, sid=None):
         import logging, traceback
         logging.getLogger(__name__).debug('emit_history failed: %s', traceback.format_exc())
 
+async def emit_clear():
+    """Emit 'clear' and prune sockethistory so reconnecting clients start fresh."""
+    sockethistory.clear()
+    await emit_history('clear', None)
+
 @sio.on('connect')
 async def dump_history(sid, data):
     print(f'New connection from {sid}')

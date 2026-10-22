@@ -137,6 +137,7 @@ class ExperimentStep(object):
         self.H_marg: Union[float, None] = None
         self.dH_marg: Union[float, None] = None
         self.foms: Union[List[np.ndarray], None] = None
+        self.all_foms: Union[List[List[np.ndarray]], None] = None  # all npoints forecast steps
         self.scaled_foms: Union[List[np.ndarray], None] = None
         self.meastimes: Union[List[np.ndarray], None] = None
         self.bkgmeastimes: Union[List[np.ndarray], None] = None
