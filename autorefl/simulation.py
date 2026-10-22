@@ -25,12 +25,16 @@ def sim_data_N(R, incident_neutrons: np.ndarray, resid_bkg=0.0, meas_bkg=0.0):
 
     return N, (bNp, bNm), Ninc
 
+_FWHM = 2 * np.sqrt(2 * np.log(2))
+
 def calc_expected_R(fitness, T, dT, L, dL, oversampling=None, resolution='normal'):
     # currently requires sorted values (by Q) because it returns sorted values.
     # this will need to be modified for CANDOR.
-    fitness.probe._set_TLR(T, dT, L, dL, R=None, dR=None, dQ=None)
+    # dT and dL arrive in 1-sigma (reductus convention); refl1d _set_TLR expects FWHM.
+    fitness.probe._set_TLR(T, dT * _FWHM, L, dL * _FWHM, R=None, dR=None, dQ=None)
     fitness.probe.resolution = resolution
     if oversampling is not None:
-        fitness.probe.oversample(oversampling)
+        fitness.probe.oversampling = oversampling
+    fitness.probe._apply_oversamplings()
     fitness.update()
     return fitness.reflectivity()[1]

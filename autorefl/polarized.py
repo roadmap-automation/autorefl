@@ -27,7 +27,7 @@ from .autorefl import AutoReflExperiment, default_fit_options, default_entropy_o
 from .datastruct import DataPoint, MeasurementPoint
 from .reduction import reduce
 from .simexp import SimReflExperiment
-from .simulation import sim_data_N
+from .simulation import sim_data_N, _FWHM
 
 # Cross-section name order matches PolarizedNeutronProbe._xs_names
 _XS_NAMES: List[str] = ['mm', 'mp', 'pm', 'pp']
@@ -118,7 +118,7 @@ class PolarizedAutoReflExperiment(AutoReflExperiment):
             mdR = spec.dv
             mQ = spec.Qz
             mdQ = spec.dQ
-            xs_probe._set_TLR(mT, mdT, mL, mdL, mR, mdR, dQ=mdQ)
+            xs_probe._set_TLR(mT, mdT * _FWHM, mL, mdL * _FWHM, mR, mdR, dQ=mdQ)
             xs_probe.oversample(self.oversampling)
             xs_probe.resolution = self.instrument.resolution
 
@@ -203,7 +203,7 @@ class PolarizedSimReflExperiment(SimReflExperiment):
             mdR = spec.dv
             mQ = spec.Qz
             mdQ = spec.dQ
-            xs_probe._set_TLR(mT, mdT, mL, mdL, mR, mdR, dQ=mdQ)
+            xs_probe._set_TLR(mT, mdT * _FWHM, mL, mdL * _FWHM, mR, mdR, dQ=mdQ)
             xs_probe.oversample(self.oversampling)
             xs_probe.resolution = self.instrument.resolution
 

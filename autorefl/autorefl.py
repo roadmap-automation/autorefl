@@ -17,7 +17,7 @@ from .entropy import calc_entropy, calc_init_entropy, default_entropy_options
 from .datastruct import DataPoint, ExperimentStep, Intent, MeasurementPoint
 from .reduction import DataPoint2ReflData, interpolate_background, reduce, ReflData
 from .inference import default_fit_options
-from .simulation import sim_data_N, calc_expected_R
+from .simulation import sim_data_N, calc_expected_R, _FWHM
 from . import instrument
 
 if TYPE_CHECKING:
@@ -342,8 +342,8 @@ class AutoReflBase(object):
                                 spec.detector.wavelength, spec.detector.wavelength_resolution,  \
                                 spec.v, spec.dv, spec.Qz, spec.dQ
 
-                m.probe._set_TLR(mT, mdT, mL, mdL, mR, mdR, dQ=mdQ)
-                m.probe.oversample(self.oversampling)
+                m.probe._set_TLR(mT, mdT * _FWHM, mL, mdL * _FWHM, mR, mdR, dQ=mdQ)
+                m.probe._apply_oversamplings()
                 m.probe.resolution = self.instrument.resolution
                 m.update()
         
@@ -435,8 +435,7 @@ class AutoReflBase(object):
         step.best_logp = fit_fields['best_logp']
         self.problem.setp(fit_fields['best_x'])
         step.final_chisq = self.problem.chisq_str()
-        _dof = self.problem.dof
-        step.final_chisq_value = float(self.problem.chisq() / _dof) if _dof > 0 else float(self.problem.chisq())
+        step.final_chisq_value = float(self.problem.chisq())
         step.H, _, _ = calc_entropy(native_draw_pts, select_pars=None, options=self.entropy_options)
         step.dH = self.init_entropy - step.H
         step.H_marg, _, _ = calc_entropy(step.draw_pts, select_pars=self.sel, options=self.entropy_options)
@@ -484,6 +483,7 @@ class AutoReflBase(object):
         # populate step foms
         # TODO: current analysis code can't handle multiple foms, could pass all of them in here
         step.foms, step.meastimes, step.bkgmeastimes = foms[0], meastimes[0], bkgmeastimes[0]
+        step.all_foms = foms  # all npoints forecast steps; list of lists of per-model arrays
 
         points = self.request_data(newpoints, foms)
 

@@ -73,7 +73,9 @@ def DataPoint2ReflData(Qbasis, data: List[DataPoint], normbase='none') -> Tuple[
 #        vinc += (vinc == 0)
         dvinc = np.sqrt(vinc)
         T, dT, L, dL = (idata[key][:, None, None] for key in ['T', 'dT', 'L', 'dL'])
-        wavelength_resolution = dL / L
+        # dL is absolute 1-sigma (Å). Store as-is: reductus dTdL2dQ (called via data.dQ)
+        # and _rebin_bank both expect absolute dL, not fractional dL/L.
+        wavelength_resolution = dL
 
         data = ReflData(monochromator=Monochromator(wavelength=L, wavelength_resolution=wavelength_resolution),
                     sample=Sample(angle_x=T),
