@@ -143,11 +143,14 @@ class ReflectometerBase(object):
         sum_w = np.bincount(bin_index, minlength=nbins)
         sum_w += (sum_w == 0)  # protect against divide by zero
 
-        # Combine wavelengths
+        # Combine wavelengths.
+        # bar_dL is the RMS of the intrinsic per-beam dL, not sqrt(mean(dL^2) + var(L)).
+        # var(L) across pairs in the bin is a binning artefact, not physical beam broadening,
+        # so including it would severely overestimate the resolution in calc_expected_R.
         sum_L = np.bincount(bin_index, weights=_L.ravel(), minlength=nbins)
-        sum_dLsq = np.bincount(bin_index, weights=(_dL.ravel()**2+_L.ravel()**2), minlength=nbins)
+        sum_dLsq = np.bincount(bin_index, weights=_dL.ravel()**2, minlength=nbins)
         bar_L = sum_L/sum_w
-        bar_dL = np.sqrt(sum_dLsq/sum_w - (sum_L/sum_w)**2)
+        bar_dL = np.sqrt(sum_dLsq/sum_w)
 
         # Combine angles
         sum_T = np.bincount(bin_index, weights=_T.ravel(), minlength=nbins)
