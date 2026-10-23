@@ -484,7 +484,7 @@ def _run_dream(problem, fit_options: dict, fitter: Optional[DreamFit],
 
     # Diagnostic: confirm the problem has data and a sane nllf before DREAM starts.
     _nllf_pre = problem.nllf()
-    print(f'  [diag] pre-DREAM nllf={_nllf_pre:.4f}  npars={len(problem.getp())}', flush=True)
+    logger.debug('pre-DREAM nllf=%.4f  npars=%d', _nllf_pre, len(problem.getp()))
 
     monitors = MonitorRunner(monitors=[_StdoutMonitor()], problem=problem)
     _orig_stopping = monitors.stopping
@@ -510,7 +510,7 @@ def _run_dream(problem, fit_options: dict, fitter: Optional[DreamFit],
     # Diagnostic: verify best_x gives the expected nllf when evaluated directly.
     _best_x, _best_logp = fitter.state.best()
     _nllf_at_best = problem.nllf(_best_x)
-    print(f'  [diag] post-DREAM best_logp={_best_logp:.4f}  nllf_at_best_x={_nllf_at_best:.4f}', flush=True)
+    logger.debug('post-DREAM best_logp=%.4f  nllf_at_best_x=%.4f', _best_logp, _nllf_at_best)
 
     return fitter
 
@@ -812,7 +812,12 @@ def build_app() -> web.Application:
 
 
 if __name__ == '__main__':
-    logging.basicConfig(level=logging.INFO)
+    logging.basicConfig(
+        handlers=[logging.StreamHandler()],
+        format='%(asctime)s.%(msecs)03d %(levelname)s %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S',
+        level=logging.INFO,
+    )
     parser = argparse.ArgumentParser(description='AutoRefl fit server')
     parser.add_argument('--host', default='0.0.0.0')
     parser.add_argument('--port', type=int, default=5031)
