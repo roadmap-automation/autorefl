@@ -63,6 +63,8 @@
                 newtable.append(newrow)
             })
             $("#queue_text").prepend(newtable)
+            plotdata.queue = Object.values(data).map(q => ({model: q['model'], q_range: q['q_range']}));
+            renderPlot()
         })
 
         socket.on("set_current_measurement", data => {
@@ -182,11 +184,43 @@
                     mode: 'lines'
                 });
             })
+            // Queued measurement Q-coverage: horizontal segments at y=1 per model.
+            // q_range=[qmin,qmax]: for MAGIK qmin==qmax (single Q); for CANDOR spans the bank.
+            const queueByModel = {};
+            (plotdata.queue || []).forEach(q => {
+                if (!queueByModel[q.model]) queueByModel[q.model] = [];
+                queueByModel[q.model].push(q.q_range);
+            });
+            Object.entries(queueByModel).forEach(([model, ranges]) => {
+                const color = CB_color_cycle[parseInt(model) % CB_color_cycle.length];
+                // Disconnected horizontal segments: [qmin, qmax, null, ...]
+                const segX = [], segY = [];
+                const midX = [];
+                ranges.forEach(([qmin, qmax]) => {
+                    segX.push(qmin, qmax, null);
+                    segY.push(1.0, 1.0, null);
+                    midX.push((qmin + qmax) / 2);
+                });
+                // Segment lines (show Q coverage width)
+                traces.push({
+                    x: segX, y: segY,
+                    mode: 'lines', type: 'scatter', showlegend: false,
+                    hoverinfo: 'none',
+                    line: {color: color, width: 2},
+                });
+                // X markers at midpoint
+                traces.push({
+                    x: midX, y: midX.map(() => 1.0),
+                    mode: 'markers', type: 'scatter', showlegend: false,
+                    hovertemplate: 'Q=%{x:.4f}<extra>queued</extra>',
+                    marker: {symbol: 'x', size: 10, color: color, line: {width: 2}},
+                });
+            });
             return traces
         }
 
         function reset_plotdata() {
-            plotdata = {'data': [], 'ci': []};
+            plotdata = {'data': [], 'ci': [], 'queue': []};
         };
 
         function renderPlot() {
@@ -207,7 +241,7 @@
         }
 
         socket.on("autorefl_data", data => {
-            plotdata = {...plotdata, ...JSON.parse(data)}
+            plotdata = {...plotdata, ...JSON.parse(data), queue: []}
             renderPlot()
         })
 

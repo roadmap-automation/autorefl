@@ -128,9 +128,13 @@ class AutoReflLauncher:
                 print('AutoLauncher: Step %i, total time so far: %.1f s' % (k, total_t), flush=True)
 
                 await emit_history('new_step', {'step': k, 'text': f'Step {k}'})
+                def _q_range(x):
+                    q = np.asarray(self.exp.instrument.x2q(x)).ravel()
+                    return [float(q.min()), float(q.max())]
                 queue_data = [
                     {'step_id': mp.step_id, 'point_id': mp.point_id, 'point_index': i,
                      'model': mp.base.model, 'x': f'{mp.base.x:.4f}',
+                     'q_range': _q_range(mp.base.x),
                      'intent': str(mp.base.intent), 'time': f'{mp.base.t:.1f}'}
                     for ptlist in points for i, mp in enumerate(ptlist)
                 ]
