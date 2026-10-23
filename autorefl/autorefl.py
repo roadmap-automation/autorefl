@@ -1103,15 +1103,12 @@ class AutoReflExperiment(AutoReflBase):
 
     Additional Inputs:
 
-    filename -- string representing the filename. Recommended to have a scheme to use a unique name.
-                Required.
     simulate_data -- boolean, optional, default False. If True, simulated data are used instead of
                     instrument data
 
     """
 
-    def __init__(self, filename: str,
-                       problem: FitProblem,
+    def __init__(self, problem: FitProblem,
                        Q: Union[np.ndarray, List[np.ndarray]],
                        instrument: instrument.ReflectometerBase = instrument.MAGIK(),
                        eta: float = 0.68,
@@ -1132,16 +1129,8 @@ class AutoReflExperiment(AutoReflBase):
                        switch_time_penalty, fit_options, entropy_options, oversampling,
                        fit_oversampling, meas_bkg, startmodel, min_meas_time, select_pars, bestpars)
 
-        self.filename = filename
-
     def get_data(self) -> List[Tuple[ReflData, Union[ReflData, None],
                                      Union[ReflData, None]]]:
-
-        #data = self.instrument.load_data(self.filename)
-
-        #for dataset in data:
-        #    pass
-
         # TODO: make sure each entry is intensity normalized!
         return super().get_data()
 

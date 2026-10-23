@@ -266,7 +266,7 @@ if __name__ == '__main__':
     dq = np.linspace(qstep, qstep_max, int(np.ceil(2 * (qmax - qmin) / (qstep_max + qstep))))
     measQ = (qmin - qstep) + np.cumsum(dq)
 
-    exp = AutoReflExperiment('test', model, measQ, instr,
+    exp = AutoReflExperiment(model, measQ, instr,
                              bestpars=bestp,
                              meas_bkg=3e-6,
                              eta=0.5,

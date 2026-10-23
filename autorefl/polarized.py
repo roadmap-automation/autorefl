@@ -56,7 +56,6 @@ class PolarizedAutoReflExperiment(AutoReflExperiment):
 
     def __init__(
         self,
-        filename: str,
         problem: FitProblem,
         Q: np.ndarray,
         instrument: instrument_module.ReflectometerBase,
@@ -74,7 +73,7 @@ class PolarizedAutoReflExperiment(AutoReflExperiment):
         # Call super with switch_penalty=0 (xs switching is free) and the
         # single-model problem.  super().__init__ sets nmodels=1.
         kwargs.setdefault('switch_penalty', 0.0)
-        super().__init__(filename, problem, Q, instrument, **kwargs)
+        super().__init__(problem, Q, instrument, **kwargs)
 
         self.polarization_states = polarization_states
 
