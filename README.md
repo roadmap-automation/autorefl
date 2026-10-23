@@ -172,7 +172,6 @@ measQ = (qmin - qstep) + np.cumsum(dq)
 
 instr = instrument.MAGIK()
 exp = AutoReflExperiment(
-    filename='tiox_sim',
     problem=problem,
     Q=measQ,
     instrument=instr,
@@ -223,7 +222,6 @@ instr = instrument.CANDOR()
 # ... calibrate_intensity(instr, ...) to load calibration files
 
 exp = AutoReflExperiment(
-    filename='my_experiment',
     problem=problem,
     Q=Q,
     instrument=instr,
@@ -231,9 +229,10 @@ exp = AutoReflExperiment(
     meas_bkg=1e-6,
 )
 
+pathname = '/data/my_experiment'
 client = FitClient(host='hpc-node', port=5031)
 signals = Signaller()
-task = NICECampaignTask(instr.trajectoryMotors(), exp.filename)
+task = NICECampaignTask(instr.trajectoryMotors(), pathname)
 
 launcher = AutoReflLauncher(
     exp=exp,
