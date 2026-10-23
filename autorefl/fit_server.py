@@ -477,7 +477,10 @@ def _run_dream(problem, fit_options: dict, fitter: Optional[DreamFit],
 
                 print(f'  step {step}  best={chisq_s}  p={p_val:.3f}  {dist_s}', flush=True)
                 if progress_q is not None:
-                    progress_q.put({'step': step, 'chisq': chisq_s})
+                    msg = {'step': step, 'chisq': chisq_s, 'p': round(p_val, 3)}
+                    if len(_draw.logp) > 0:
+                        msg.update({'chi_median': round(_p50, 3), 'chi_lo': round(_p16, 3), 'chi_hi': round(_p84, 3)})
+                    progress_q.put(msg)
 
     # Diagnostic: confirm the problem has data and a sane nllf before DREAM starts.
     _nllf_pre = problem.nllf()

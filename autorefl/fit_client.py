@@ -120,7 +120,7 @@ class FitClient:
         warm_start: bool = False,
         requested_derived_labels: List[str] = [],
         timeout_s: float = 7200.0,
-        progress_callback: Optional[Callable[[int, str], None]] = None,
+        progress_callback: Optional[Callable[[dict], None]] = None,
     ) -> Tuple[dict, List[np.ndarray]]:
         """Run DREAM fit + Q-profile calculation on the remote server.
 
@@ -167,8 +167,7 @@ class FitClient:
                         break
                     if progress_callback is not None:
                         try:
-                            msg = json.loads(line)
-                            progress_callback(msg['step'], msg['chisq'])
+                            progress_callback(json.loads(line))
                         except (json.JSONDecodeError, KeyError):
                             pass
                 return await resp.content.read(-1)

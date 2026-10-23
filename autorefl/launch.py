@@ -146,8 +146,14 @@ class AutoReflLauncher:
                     break
 
                 print('AutoLauncher: fitting data', flush=True)
-                def _fit_progress(step: int, chisq: str) -> None:
-                    asyncio.create_task(emit_history('fit_update', f'step {step}, chisq={chisq}'))
+                def _fit_progress(msg: dict) -> None:
+                    step = msg.get('step', '?')
+                    parts = [f'step {step}', f'best={msg["chisq"]}']
+                    if 'p' in msg:
+                        parts.append(f'p={msg["p"]:.3f}')
+                    if 'chi_median' in msg:
+                        parts.append(f'post={msg["chi_median"]}[{msg["chi_lo"]},{msg["chi_hi"]}]')
+                    asyncio.create_task(emit_history('fit_update', '  '.join(parts)))
                 await self.exp.fit_step(self.client, warm_start=warm_start, progress_callback=_fit_progress)
                 warm_start = True
 
