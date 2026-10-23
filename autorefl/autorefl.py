@@ -826,9 +826,14 @@ class AutoReflBase(object):
                 meastime_sel = 1.0 / xrefl_sel
                 meastime_meas = 1.0 / xrefl_meas
 
-                # Compare uncertainty in background to expected uncertainty in reflectivity
-                t_0 = 1.0 / (incident_neutrons * xqbkg * (xdbkg / xqbkg) ** 2)
-                t_bkg = 1.0 / (incident_neutrons * xqbkg * (meas_sigma / xqbkg) ** 2)
+                # Compare uncertainty in background to expected uncertainty in reflectivity.
+                # xqbkg may be zero at Q values with no background data; treat those as
+                # needing no background measurement (time = 0) to avoid NaN propagation.
+                with np.errstate(divide='ignore', invalid='ignore'):
+                    t_0 = 1.0 / (incident_neutrons * xqbkg * (xdbkg / xqbkg) ** 2)
+                    t_bkg = 1.0 / (incident_neutrons * xqbkg * (meas_sigma / xqbkg) ** 2)
+                t_0 = np.nan_to_num(t_0, nan=0.0, posinf=0.0, neginf=0.0)
+                t_bkg = np.nan_to_num(t_bkg, nan=0.0, posinf=0.0, neginf=0.0)
                 if show_plots:
                     plt.plot(t_0)
                     plt.plot(t_bkg)
