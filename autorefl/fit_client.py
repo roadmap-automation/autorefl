@@ -168,8 +168,7 @@ class FitClient:
                     if progress_callback is not None:
                         try:
                             msg = json.loads(line)
-                            if isinstance(msg.get('step'), int):
-                                progress_callback(msg['step'], msg['chisq'])
+                            progress_callback(msg['step'], msg['chisq'])
                         except (json.JSONDecodeError, KeyError):
                             pass
                 return await resp.content.read(-1)
