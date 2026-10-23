@@ -29,6 +29,7 @@ import dill
 import h5py
 import numpy as np
 from aiohttp import web
+from scipy.stats import chi2 as _chi2
 
 from bumps.fitters import DreamFit, MonitorRunner
 from bumps.initpop import generate
@@ -449,14 +450,19 @@ def _run_dream(problem, fit_options: dict, fitter: Optional[DreamFit],
         # Re-attach to new problem object (deserialized each call).
         fitter.problem = problem
 
+    _n_data = problem.dof + len(problem.getp())
+
     class _StdoutMonitor:
         def config_history(self, history):
             pass
         def __call__(self, history):
             step = history.step[0]
             if step % 100 == 0:
-                chisq_s = problem.chisq_str(nllf=history.value[0])
-                print(f'  step {step}  chisq={chisq_s}', flush=True)
+                nllf = history.value[0]
+                dof = problem.dof
+                chisq_s = problem.chisq_str(nllf=nllf)
+                p_val = _chi2.sf(2 * nllf, df=dof if dof > 0 else _n_data)
+                print(f'  step {step}  chisq={chisq_s}  p={p_val:.3f}', flush=True)
                 if progress_q is not None:
                     progress_q.put({'step': step, 'chisq': chisq_s})
 
@@ -489,6 +495,32 @@ def _run_dream(problem, fit_options: dict, fitter: Optional[DreamFit],
     _best_x, _best_logp = fitter.state.best()
     _nllf_at_best = problem.nllf(_best_x)
     print(f'  [diag] post-DREAM best_logp={_best_logp:.4f}  nllf_at_best_x={_nllf_at_best:.4f}', flush=True)
+
+    # Chi-squared summary over posterior draws.  draw.logp is already stored by
+    # DREAM — no extra forward-model calls needed.
+    _draw = fitter.state.draw()
+    _chi_draws = -2.0 * _draw.logp          # 2*nllf for each posterior draw
+    _dof = problem.dof
+    if _dof > 0:
+        _chi_norm = _chi_draws / _dof
+        _p16, _p50, _p84 = np.percentile(_chi_norm, [16, 50, 84])
+        _best_s = problem.chisq_str(nllf=-_best_logp)
+        _summary = f'  chisq  best={_best_s}  posterior={_p50:.3f}[{_p16:.3f},{_p84:.3f}]  (dof={_dof})'
+    else:
+        _p16, _p50, _p84 = np.percentile(_chi_draws, [16, 50, 84])
+        _best_s = f'{-2*_best_logp:.4g}'
+        _summary = f'  2*nllf best={_best_s}  posterior={_p50:.3f}[{_p16:.3f},{_p84:.3f}]  (underdetermined dof={_dof})'
+    print(_summary, flush=True)
+    if progress_q is not None:
+        progress_q.put({
+            'step': 'summary',
+            'chisq': _best_s,
+            'chi_median': _p50,
+            'chi_lo': _p16,
+            'chi_hi': _p84,
+            'dof': _dof,
+        })
+
     return fitter
 
 
