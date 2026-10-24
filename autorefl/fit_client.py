@@ -182,8 +182,9 @@ class FitClient:
         calc_tdtldl,
         oversampling: int,
         resolution: str,
+        requested_derived_labels: List[str] = [],
         timeout_s: float = 600.0,
-    ) -> List[np.ndarray]:
+    ) -> tuple:
         """Calculate Q-profiles for arbitrary draw points (no fitting).
 
         Used by ``AutoReflBase.initial_points()``.
@@ -192,6 +193,8 @@ class FitClient:
         -------
         qprofs : list[np.ndarray]
             One array per model, shape (npoints, nQ).
+        derived_arr : np.ndarray
+            Shape (npoints, D); empty (D=0) when no derived labels were requested.
         """
         problem_json = json.dumps(bumps_serialize(problem))
         encoded_tdtldl = _encode_tdtldl(calc_tdtldl)
@@ -206,6 +209,8 @@ class FitClient:
             data.add_field('calc_tdtldl', encoded_tdtldl)
             data.add_field('oversampling', str(oversampling))
             data.add_field('resolution', resolution)
+            if requested_derived_labels:
+                data.add_field('requested_derived_labels', json.dumps(requested_derived_labels))
             async with session.post(
                 f'{self.base_url}/qprofiles',
                 data=data,
@@ -219,7 +224,12 @@ class FitClient:
         hdf5_bytes = await self._with_retry(_impl)
         buf = io.BytesIO(hdf5_bytes)
         with h5py.File(buf, 'r') as f:
-            return _read_qprofs(f)
+            qprofs = _read_qprofs(f)
+            if 'derived_draws' in f:
+                derived_arr = f['derived_draws'][:]
+            else:
+                derived_arr = np.empty((len(draw_points), 0))
+        return qprofs, derived_arr
 
     async def post_setup(
         self,

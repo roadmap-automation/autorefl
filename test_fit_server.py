@@ -91,7 +91,7 @@ async def main():
         print(f'[2/6] /setup OK — {len(setup["native_labels"])} native labels, 0 derived')
 
         # 3. qprofiles
-        qprofs = await client.post_qprofiles(
+        qprofs, derived_arr = await client.post_qprofiles(
             problem=problem,
             draw_points=draw_points,
             calc_tdtldl=calc_tdtldl,
@@ -101,6 +101,7 @@ async def main():
         assert len(qprofs) == 1,                       'expected 1 model'
         assert qprofs[0].shape[0] == len(draw_points),  'wrong ndraws'
         assert qprofs[0].shape[1] == len(measQ),         'wrong nQ'
+        assert derived_arr.shape == (len(draw_points), 0), 'expected empty derived for plain Experiment'
         print(f'[3/6] /qprofiles OK — shape {qprofs[0].shape}')
 
         # 4. cold fit

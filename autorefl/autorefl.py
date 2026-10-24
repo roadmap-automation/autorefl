@@ -167,10 +167,20 @@ class AutoReflBase(object):
         self.available_derived_labels: List[str] = []
         self.derived_prior_scales: np.ndarray = np.array([])
         self._all_labels: List[str] = list(problem.labels())
+        # Subset of available_derived_labels that appear in select_pars_spec.
+        # draw_pts columns are native + this list only (not all derived).
+        self._requested_derived_labels: List[str] = []
 
         # Store the original spec so _resolve_sel() can re-resolve after model changes.
         self.select_pars_spec = select_pars
-        self.sel: np.ndarray = self._resolve_sel()
+        # String specs may reference derived labels that aren't known until setup() runs.
+        # Use a placeholder here; setup() calls _resolve_sel() again with the full label list.
+        _spec_has_strings = (
+            select_pars is not None and
+            len(list(select_pars)) > 0 and
+            isinstance(list(select_pars)[0], str)
+        )
+        self.sel: np.ndarray = np.array([], dtype=int) if _spec_has_strings else self._resolve_sel()
 
         # initialize objects required for fitting
         self.fit_options = {**default_fit_options, **fit_options}
@@ -231,23 +241,35 @@ class AutoReflBase(object):
         self.available_derived_labels = result['derived_labels']
         self.derived_prior_scales = np.array(result['prior_scales'])
 
-        # Rebuild the unified label list and extend par_scale to cover derived params.
+        # Compact subset: only derived labels that appear in select_pars_spec.
+        # draw_pts columns are always native + this list (not all available derived).
+        self._requested_derived_labels = [
+            lbl for lbl in self.available_derived_labels
+            if lbl in (self.select_pars_spec or [])
+        ]
+
+        # _all_labels kept for validation in _resolve_sel; NOT used as column index space.
         self._all_labels = result['native_labels'] + result['derived_labels']
-        if len(self.derived_prior_scales):
-            native_scale = np.diff(self.problem.bounds(), axis=0)  # (1, npars)
+
+        # par_scale covers native + requested derived only — matches draw_pts layout.
+        native_scale = np.diff(self.problem.bounds(), axis=0)  # (1, npars)
+        if self._requested_derived_labels and len(self.derived_prior_scales):
+            req_idx = [self.available_derived_labels.index(lbl) for lbl in self._requested_derived_labels]
             self.par_scale = np.concatenate(
-                [native_scale, self.derived_prior_scales[np.newaxis, :]], axis=1
+                [native_scale, self.derived_prior_scales[req_idx][np.newaxis, :]], axis=1
             )
+        else:
+            self.par_scale = native_scale
 
         # Re-resolve sel now that derived labels are known — validates select_pars_spec.
         self.sel = self._resolve_sel()
 
-        # Compute init_entropy_marg over the expanded prior draws returned by /setup.
-        # This is the correct baseline when derived labels appear in select_pars_spec.
+        # Compute init_entropy_marg over compact prior draws (native + requested derived).
         native_draws  = result['native_draws']   # (N, npars)
-        derived_draws = result['derived_draws']  # (N, D) or (N, 0)
-        if derived_draws.shape[1] > 0:
-            all_prior_draws = np.concatenate([native_draws, derived_draws], axis=1)
+        derived_draws = result['derived_draws']  # (N, D_all) or (N, 0)
+        if self._requested_derived_labels and derived_draws.shape[1] > 0:
+            req_idx = [self.available_derived_labels.index(lbl) for lbl in self._requested_derived_labels]
+            all_prior_draws = np.concatenate([native_draws, derived_draws[:, req_idx]], axis=1)
         else:
             all_prior_draws = native_draws
 
@@ -273,6 +295,7 @@ class AutoReflBase(object):
         await client.post_reset()
         self.available_derived_labels = []
         self.derived_prior_scales = np.array([])
+        self._requested_derived_labels = []
         self._all_labels = list(self.problem.labels())
         self.par_scale = np.diff(self.problem.bounds(), axis=0)
         self.sel = self._resolve_sel()
@@ -293,13 +316,19 @@ class AutoReflBase(object):
         if len(spec) == 0:
             return np.array([], dtype=int)
         if isinstance(spec[0], str):
+            # Index into the compact draw_pts column space: native + requested_derived only.
+            compact_labels = list(self.problem.labels()) + list(self._requested_derived_labels)
             resolved = []
             for name in spec:
                 try:
-                    resolved.append(self._all_labels.index(name))
+                    resolved.append(compact_labels.index(name))
                 except ValueError:
+                    if name not in self._all_labels:
+                        raise ValueError(
+                            f"select_pars label {name!r} not found in native or derived labels"
+                        )
                     raise ValueError(
-                        f"select_pars label {name!r} not found in native or derived labels"
+                        f"select_pars label {name!r} is a derived label but not in the requested set"
                     )
             return np.array(resolved, dtype=int)
         return np.array(spec, dtype=int)
@@ -347,16 +376,22 @@ class AutoReflBase(object):
 
         calc_tdtldl = [self.instrument.Q2TdTLdL(mQ, mx, mQ) for mQ, mx in zip(self.measQ, self.x)]
 
-        init_qprof = await client.post_qprofiles(
+        requested_derived = self._requested_derived_labels
+
+        init_qprof, derived_arr = await client.post_qprofiles(
             problem=self.problem,
             draw_points=initpts,
             calc_tdtldl=calc_tdtldl,
             oversampling=self.oversampling,
             resolution=self.instrument.resolution,
+            requested_derived_labels=requested_derived,
         )
 
         initstep = ExperimentStep([])
-        initstep.draw_pts = initpts
+        if derived_arr.size > 0:
+            initstep.draw_pts = np.concatenate([initpts, derived_arr], axis=1)
+        else:
+            initstep.draw_pts = initpts
         initstep.qprofs = init_qprof
         points = self.take_step(initstep)
 
@@ -434,11 +469,7 @@ class AutoReflBase(object):
         }
         calc_tdtldl = [self.instrument.Q2TdTLdL(mQ, mx, mQ) for mQ, mx in zip(self.measQ, self.x)]
 
-        # Derived labels to request — only those in select_pars_spec that are derived.
-        requested_derived = [
-            lbl for lbl in self.available_derived_labels
-            if lbl in (self.select_pars_spec or [])
-        ]
+        requested_derived = self._requested_derived_labels
 
         fit_fields, qprofs = await client.post_fit(
             problem=self.problem,

@@ -104,6 +104,10 @@ class AutoReflLauncher:
         else:
             print('AutoLauncher: no intensity calibration provided, using simulation fallback')
 
+        if not self.exp._ready:
+            print('AutoLauncher: running setup to discover derived parameters')
+            await self.exp.setup(self.client)
+
         print('AutoLauncher: calculating initial points')
         points, init_qprofs, init_step = await self.exp.initial_points(self.client)
 

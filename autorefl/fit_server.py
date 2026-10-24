@@ -133,10 +133,23 @@ def _qprof_worker(point):
 # ── Molgroups derived parameter helpers ─────────────────────────────────────
 
 def _is_molgroups_experiment(model) -> bool:
-    # Use MRO names rather than hasattr(_molgroups_layers): that attribute is assigned
-    # in __init__ but is not a declared dataclass field, so dill drops it on round-trip.
-    return any(cls.__name__ in ('MolgroupsExperiment', 'MolgroupsMixedExperiment')
-               for cls in type(model).__mro__)
+    # Primary: MRO name check (avoids importing molgroups in the server process).
+    # Fallback: structural attribute check, which survives dill round-trips from
+    # load_model()-executed scripts where class identity may not reconstruct cleanly.
+    mro_match = any(cls.__name__ in ('MolgroupsExperiment', 'MolgroupsMixedExperiment')
+                    for cls in type(model).__mro__)
+    if mro_match:
+        return True
+    # Structural fallback: does the model have a molgroups_layer on its sample?
+    if hasattr(model, 'sample') and hasattr(model.sample, 'molgroups_layer'):
+        logger.debug('_is_molgroups_experiment: MRO miss for %s, matched via sample.molgroups_layer', type(model))
+        return True
+    if hasattr(model, 'parts'):
+        for p in model.parts:
+            if hasattr(p, 'sample') and hasattr(p.sample, 'molgroups_layer'):
+                logger.debug('_is_molgroups_experiment: MRO miss for %s, matched via parts.sample.molgroups_layer', type(model))
+                return True
+    return False
 
 
 def _collect_molgroups_layers(model) -> list:
@@ -203,13 +216,19 @@ def _discover_derived(problem) -> Tuple[List[str], np.ndarray, np.ndarray, np.nd
     """
     empty = [], np.array([]), np.empty((0, len(problem.getp()))), np.empty((0, 0))
 
+    model_list = list(problem.models)
     molgroups_model_indices = [
-        i for i, m in enumerate(problem.models) if _is_molgroups_experiment(m)
+        i for i, m in enumerate(model_list) if _is_molgroups_experiment(m)
     ]
+    logger.debug('_discover_derived: %d models, molgroups indices=%s, types=%s',
+                 len(model_list), molgroups_model_indices,
+                 [type(m).__name__ for m in model_list])
     if not molgroups_model_indices:
         return empty
 
-    pop_size = 200
+    # 50 evaluations is enough: labels come from the first success, ranges need
+    # only rough coverage — prior_scales are used for normalisation, not precision.
+    pop_size = 50
     try:
         prior_pts = generate(problem, init='lhs', pop=pop_size, use_point=False)
     except Exception:
@@ -752,9 +771,12 @@ async def post_qprofiles(request: web.Request) -> web.Response:
             for model_coords in raw_coords
         ]
 
+        requested_derived_labels = json.loads(fields.get('requested_derived_labels', '[]'))
+
         state: ServerState = request.app['state']
-        qprofs, _ = await asyncio.to_thread(
-            _calc_qprofiles_sync, problem, draw_points, calc_tdtldl, resolution, state.mp_manager
+        qprofs, derived_arr = await asyncio.to_thread(
+            _calc_qprofiles_sync, problem, draw_points, calc_tdtldl, resolution, state.mp_manager,
+            requested_derived_labels,
         )
 
         buf = io.BytesIO()
@@ -762,6 +784,9 @@ async def post_qprofiles(request: web.Request) -> web.Response:
             for i, qp in enumerate(qprofs):
                 f.create_dataset(f'qprofs/model_{i}', data=qp, compression='gzip')
             f.attrs['nmodels'] = len(qprofs)
+            if derived_arr.size > 0:
+                f.create_dataset('derived_draws', data=derived_arr, compression='gzip')
+                f.attrs['derived_labels'] = json.dumps(requested_derived_labels)
         buf.seek(0)
 
         return web.Response(
