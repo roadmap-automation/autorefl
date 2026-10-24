@@ -281,19 +281,7 @@ if __name__ == '__main__':
                              fit_options={'burn': 1000, 'steps': 100, 'pop': 8})
     if instr.name == 'MAGIK':
         exp.x = exp.measQ
-    elif instr.name == 'CANDOR':
-        for i, measQ in enumerate(exp.measQ):
-            x = []
-            overlap = 0.90
-            xrng = exp.instrument.qrange2xrange([min(measQ), max(measQ)])
-            x.append(xrng[0])
-            while x[-1] < xrng[1]:
-                curq = exp.instrument.x2q(x[-1])
-                curminq, curmaxq = np.min(curq), np.max(curq)
-                newrng = exp.instrument.qrange2xrange([curminq + (curmaxq - curminq) * (1 - overlap), max(measQ)])
-                x.append(newrng[0])
-            x[-1] = xrng[1]
-            exp.x[i] = np.array(x)
+    # CANDOR: __init__ default (linspace of angles) is sufficient
 
     fprefix = '%s_eta%0.2f_npoints%i' % (instr.name, exp.eta, exp.npoints)
     fn = datetime.datetime.now().strftime('%Y%m%dT%H%M%S')
