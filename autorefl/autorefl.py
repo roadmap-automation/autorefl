@@ -821,10 +821,15 @@ class AutoReflBase(object):
 
                 # Calculate measurement times (shape XD)
                 med = np.median(xqprof, axis=0)
-                xrefl_sel = (incident_neutrons * med * (sel_sigma / med) ** 2)
-                xrefl_meas = (incident_neutrons * med * (meas_sigma / med) ** 2)
-                meastime_sel = 1.0 / xrefl_sel
-                meastime_meas = 1.0 / xrefl_meas
+                with np.errstate(divide='ignore', invalid='ignore'):
+                    xrefl_sel = (incident_neutrons * med * (sel_sigma / med) ** 2)
+                    xrefl_meas = (incident_neutrons * med * (meas_sigma / med) ** 2)
+                    meastime_sel = 1.0 / xrefl_sel
+                    meastime_meas = 1.0 / xrefl_meas
+                # med=0 (zero reflectivity) or sigma=0 produces nan via 0*inf; map to inf
+                # so dHdt=0 at those points (no information to gain).
+                meastime_sel = np.nan_to_num(meastime_sel, nan=np.inf, posinf=np.inf, neginf=np.inf)
+                meastime_meas = np.nan_to_num(meastime_meas, nan=np.inf, posinf=np.inf, neginf=np.inf)
 
                 # Compare uncertainty in background to expected uncertainty in reflectivity.
                 # xqbkg may be zero at Q values with no background data; treat those as
@@ -870,13 +875,14 @@ class AutoReflBase(object):
                             # jointly — a sample is kept only if it agrees at every bin.
                             newsigma = np.sqrt(med[sl] / (incident_neutrons[sl] * self.min_meas_time))
                             newcrit = np.all(np.abs(xqprof[:, sl] - med[sl]) < 2 * newsigma, axis=1)
-                            if newcrit.sum() >= 3:
+                            if newcrit.sum() >= pts.shape[1] + 1:
                                 iH, _, predictor = calc_entropy(pts[newcrit], None, options=self.entropy_options, predictor=predictor)
-                            else:
-                                iH = H0
-                            mt_sel = self.min_meas_time
-
-                        dHdt = np.sum(H0 - iH) / mt_sel
+                            # iH is now scalar if corrected, array if not; either way divide by
+                            # min_meas_time so the config isn't artificially inflated or zeroed.
+                            dHdt = np.sum(H0 - iH) / self.min_meas_time
+                        else:
+                            # sum of per-bin information rates, matching the CANDOR formula
+                            dHdt = np.sum((H0 - iH) / meastime_sel[sl])
 
                         meas_time.append(mt)
                         bkg_meas_time.append(mt_bkg)
@@ -891,20 +897,29 @@ class AutoReflBase(object):
                     bkg_meas_time = np.array(bkg_meas_time)
 
                 else:
+                    # TODO: compute entropy at measQ resolution (485 bins) then broadcast back to XD
+                    # (26190 pts). A is 54x redundant because xqprof[:, k] == qprof[:, bin(k)] for all
+                    # wavelengths sharing a measQ bin. Plan: .claude/plans/autorefl-measq-fom-optimization.md
                     Hs, _, predictor = calc_entropy(A, None, options=self.entropy_options, predictor=predictor)
 
                     if correct_meastime:
-                        # Per-bin correction: where the measurement time is below min_meas_time,
-                        # recompute H using the CI actually achievable in min_meas_time.
+                        # Per-bin correction consistent with the independent-channels FOM model:
+                        # each wavelength's dHdt is computed independently, so the correction is
+                        # also per-wavelength.  A joint criterion across multiple wavelengths
+                        # exponentially shrinks the surviving sample count and causes widespread
+                        # zeroing via the H0 fallback.
+                        min_samples = pts.shape[1] + 1  # MVN covariance needs P+1 points
                         for k in range(len(meastime_sel)):
                             if meastime_sel[k] < self.min_meas_time:
                                 newsigma = np.sqrt(med[k] / (incident_neutrons[k] * self.min_meas_time))
                                 newcrit = np.abs(xqprof[:, k] - med[k]) < 2 * newsigma
-                                if newcrit.sum() >= 3:
+                                if newcrit.sum() >= min_samples:
                                     Hs[k] = calc_entropy(pts[newcrit], None, options=self.entropy_options, predictor=predictor)[0]
-                                else:
-                                    Hs[k] = H0
+                                # always correct the time regardless of sample count: when
+                                # newcrit is too tight to estimate Hs, keep original Hs[k] but
+                                # normalise by min_meas_time so dHdt isn't artificially inflated.
                                 meastime_sel[k] = self.min_meas_time
+                                meastime_meas[k] = self.min_meas_time
 
                     # figure of merit is dHdt (reshaped to X x D)
                     dHdt = (H0 - Hs) / meastime_sel
@@ -912,9 +927,15 @@ class AutoReflBase(object):
 
                     # calculate fom and average time (shape X)
                     fom = np.sum(dHdt, axis=1)
-                    meas_time = 1. / np.sum(1. / np.reshape(meastime_meas, init_shape), axis=1)
-                    with np.errstate(divide='ignore', invalid='ignore'):
-                        bkg_meas_time = 1. / np.sum(1. / np.reshape(bkg_meastime, init_shape), axis=1)
+                    # All D channels measure simultaneously; the hold time is set by the
+                    # slowest channel, so take the max over channels (not the harmonic mean).
+                    meas_time = np.max(np.reshape(meastime_meas, init_shape), axis=1)
+                    # Same simultaneous-detector logic: background hold time is max over
+                    # channels that actually contribute a background measurement.
+                    bkg_reshaped = np.reshape(bkg_meastime, init_shape)
+                    bkg_meas_time = np.where(np.any(bkg_reshaped > 0, axis=1),
+                                             np.max(np.where(bkg_reshaped > 0, bkg_reshaped, 0.0), axis=1),
+                                             0.0)
 
                 Hlist.append(Hs)
                 foms.append(fom)
