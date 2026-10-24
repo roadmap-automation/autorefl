@@ -135,75 +135,33 @@ For simulation studies on a single machine, start the server in one terminal and
 
 Simulation uses `SimulatedBackend`, which generates synthetic count data from the model's current parameter values as ground truth. The fit server must be running — simulation still uses DREAM for fitting, it just replaces hardware measurement with Poisson-sampled synthetic counts.
 
-Start the fit server in one terminal, then run your simulation script:
+A ready-to-run example script is provided at `example_refl_sim.py`. It works with both CANDOR and MAGIK — set the `INSTR` constant at the top of the file.
 
 ```bash
+# Terminal 1 — start the fit server
 python -m autorefl.fit_server
+
+# Terminal 2 — run the simulation (edit INSTR in the script first if needed)
+python example_refl_sim.py
 ```
 
-The script below runs end-to-end using the example model in `example_model/`. Copy it to the repo root (not inside `example_model/`) and run it:
+Output is written to `./{instr}_sim_run/`. The live web monitor starts automatically on port 5006.
 
-```python
-import asyncio
-import os
-import numpy as np
-from pathlib import Path
-from bumps.cli import load_model
-from autorefl.autorefl import AutoReflExperiment
-from autorefl.launch import AutoReflLauncher
-from autorefl.backend import SimulatedBackend
-from autorefl.fit_client import FitClient
-from autorefl.remote.nicedata import Signaller
-from autorefl import instrument
+### What the script does
 
-MODEL_DIR = Path(__file__).parent / 'example_model'
+1. Loads the bumps model and ground-truth parameters from `example_model/`.
+2. Builds a non-uniform Q grid (`measQ`) — finer at low Q where features are sharpest, coarser at high Q.
+3. Instantiates the chosen instrument and creates an `AutoReflExperiment`. `measQ` is the rebinning axis for the fit server; the instrument's scan coordinate grid (`exp.x`) is derived from it via `qrange2xrange` and covers the same Q range as a set of angle (CANDOR) or Q (MAGIK) positions.
+4. Runs `AutoReflLauncher` with `SimulatedBackend`, which replaces each hardware measurement with Poisson-sampled synthetic counts drawn from the ground-truth model. The FOM loop, DREAM fitting, and point selection are identical to a live experiment.
 
-problem = load_model(str(MODEL_DIR / 'tiox_dopc_d2o.py'))
+### Instrument differences
 
-# Load ground-truth parameters — SimulatedBackend draws synthetic counts from these.
-par_lines = (MODEL_DIR / 'tiox_dopc_d2o.par').read_text().splitlines()
-bestpars = np.array([float(line.split()[-1]) for line in par_lines if line.strip()])
-
-# Q grid
-qmin, qmax, qstep, qstep_max = 0.008, 0.25, 0.0005, 0.0024
-dq = np.linspace(qstep, qstep_max,
-                 int(np.ceil(2 * (qmax - qmin) / (qstep_max + qstep))))
-measQ = (qmin - qstep) + np.cumsum(dq)
-
-instr = instrument.MAGIK()
-exp = AutoReflExperiment(
-    problem=problem,
-    Q=measQ,
-    instrument=instr,
-    eta=0.68,
-    meas_bkg=3e-6,
-    bestpars=bestpars,
-)
-# For MAGIK the scan coordinate is Q directly (single wavelength, 1:1 with angle)
-exp.x = exp.measQ
-
-pathname = './tiox_sim_run'
-os.makedirs(pathname, exist_ok=True)
-
-signals = Signaller()
-signals.global_start.set()  # skip the web-monitor Start-button gate
-
-async def main():
-    client = FitClient()
-    await client.connect()
-    try:
-        launcher = AutoReflLauncher(
-            exp, client, signals,
-            maxtime=3600,
-            pathname=pathname,
-            backend=SimulatedBackend(exp),
-        )
-        await launcher.run()
-    finally:
-        await client.disconnect()
-
-asyncio.run(main())
-```
+| | CANDOR | MAGIK |
+|---|---|---|
+| Channels | 54 wavelengths simultaneously | 1 (point detector) |
+| Scan coordinate `x` | angle (degrees) | Q (Å⁻¹) |
+| `exp.x` default | angle linspace from `qrange2xrange` | same — but script overrides to `exp.measQ` to align exactly with rebinning axis |
+| Measurement time | `max` over channels (slowest channel sets hold time) | per-point directly |
 
 ---
 
