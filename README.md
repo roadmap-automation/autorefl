@@ -261,6 +261,8 @@ Two things are needed: a custom `Instrument` subclass and a `MeasurementBackend`
 
 The `Instrument` object is not just metadata — `intensity(x)` feeds directly into the FOM calculation (expected counts per second scales the information-gain estimate). A wrong intensity model will cause the algorithm to make poor time-allocation decisions.
 
+**Multi-detector measurement time:** For instruments where all detector channels measure *simultaneously* at one angle setting (e.g. CANDOR with 54 wavelength channels), the physical hold time at an angle is determined by the slowest (hardest) channel — i.e. `max(t_k)` over channels, not a per-channel average. The FOM still sums `dH/dt` contributions across channels, but the measurement time returned to the scheduler and used by the simulator is the channel-wise maximum. This is handled automatically; custom `Instrument` subclasses do not need to implement anything extra, but calibration data returned by `intensity(x)` must accurately represent per-channel rates so that high-Q channels (low rate → long time) are not under-timed.
+
 Required methods:
 
 | Method | Returns | Used for |
@@ -368,6 +370,8 @@ The figure of merit is the expected information gain *dH/dt* (entropy change per
 - **Model selection:** Autonomous switching between bumps models with different parameter spaces (e.g. choosing between 1-layer and 2-layer fits) is designed but not yet implemented. See `.claude/plans/autorefl-model-selection.md`.
 
 - **MAGIK support:** `DummySampleChanger` and a `magik_app.py` entry point for the MAGIK instrument are planned but not yet written. The reflectometry method classes are already instrument-agnostic.
+
+- **FOM ranking vs. actual time cost (open):** The FOM sums `dH/dt` per channel using each channel's individual `t_k` as the denominator, but the actual time cost of an angle setting is `max(t_k)`. This means the FOM slightly overvalues angle settings where some channels are easy and some are hard — the easy channels inflate `sum(dH/dt)` but the time cost is set by the hard channels. The simulation time passed to the scheduler correctly uses `max(t_k)` (fixed 2026-10-24); the ranking bias is a secondary issue that does not affect measurement validity.
 
 ---
 
