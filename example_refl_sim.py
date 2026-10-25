@@ -103,6 +103,7 @@ exp = AutoReflExperiment(
     oversampling=11,     # resolution-smearing oversampling in fit
     fit_oversampling=False,
     fit_options={'burn': 1000, 'steps': 100, 'pop': 4, 'alpha': 0.000},
+    select_pars=['bilayer.mass per area (ng/cm2)']
 )
 
 # ── Scan coordinate (exp.x) ───────────────────────────────────────────────────
