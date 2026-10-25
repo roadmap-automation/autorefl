@@ -131,7 +131,7 @@ async def main():
         'steps':   0,
     }
 
-    async with FitClient(host='127.0.0.1', port=5100) as client:
+    async with FitClient(host='127.0.0.1', port=5031) as client:
 
         # 1. status
         alive = await client.is_alive()
