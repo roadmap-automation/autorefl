@@ -101,6 +101,16 @@ class AutoReflLauncher:
             await asyncio.to_thread(
                 calibrate_intensity, self.exp.instrument, self.intensity_template, self.intensity_files
             )
+            instr = self.exp.instrument
+            if (instr.fixed_slits is None
+                    and len(instr.s1_intens_calib) == 1
+                    and np.isfinite(instr.sample_width)):
+                s1 = float(instr.s1_intens_calib[0])
+                s2 = s1 / instr._R12
+                s3 = (s1 + s2) * (instr._L2S + instr._LS3) / instr._L12 + s2 + instr._S3Offset
+                s4 = (s1 + s2) * (instr._L2S + instr._LS3 + instr._L34) / instr._L12 + s2 + instr._S3Offset
+                instr.fixed_slits = (s1, s2, s3, s4)
+                print(f'AutoLauncher: single-point calibration detected — flood beam mode, fixed_slits={instr.fixed_slits}')
         else:
             print('AutoLauncher: no intensity calibration provided, using simulation fallback')
 
@@ -233,6 +243,8 @@ class AutoReflLauncher:
             refl = reduce(specdata, bkgpdata, bkgmdata)
             if refl is not None:
                 plotdata['data'].append({'x': list(refl.x), 'v': list(refl.v), 'dv': list(refl.dv)})
+            else:
+                plotdata['data'].append(None)
         return json.dumps(plotdata)
 
     def update_plot_profiles(self, allqprofs) -> str:

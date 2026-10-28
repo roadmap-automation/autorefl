@@ -1,22 +1,22 @@
-"""Polarized beam AutoRefl experiment classes.
+"""Polarized beam AutoRefl experiment class.
 
-PolarizedAutoReflExperiment and PolarizedSimReflExperiment extend the
-unpolarized base classes by mapping cross-sections (xs) onto the existing
-nmodels dimension.  Each active xs slot becomes one AutoRefl "model";
-switch_penalty=0.0 makes xs transitions cost-free so the FOM loop
-allocates time across xs freely.
+PolarizedAutoReflExperiment extends AutoReflExperiment by mapping
+cross-sections (xs) onto the existing nmodels dimension.  Each active xs slot
+becomes one AutoRefl "model"; switch_penalty=0.0 makes xs transitions
+cost-free so the FOM loop allocates time across xs freely.
 
-The only non-trivial changes from the base classes are:
+Key differences from AutoReflExperiment:
   - __init__: expand nmodels=1 → n_active_xs, build xs_indices mapping
   - update_models: dispatch to probe.xs[xs_indices[i]] instead of models[i].probe
   - request_data: merge flipper motor positions into each MeasurementPoint
-  - _simulate_datapoint (PolarizedSimReflExperiment only): index into
-    experiment.reflectivity() by xs_indices[model_num]
+  - _simulate_datapoint: index into calc_expected_R result by model_num
+
+Use with SimulatedBackend for offline simulation (no hardware required).
 """
 
 from __future__ import annotations
 
-from typing import Dict, List, Optional, Union
+from typing import Dict, List, Optional
 
 import numpy as np
 from bumps.fitproblem import FitProblem
@@ -26,8 +26,7 @@ from . import instrument as instrument_module
 from .autorefl import AutoReflExperiment, default_fit_options, default_entropy_options
 from .datastruct import DataPoint, MeasurementPoint
 from .reduction import reduce
-from .simexp import SimReflExperiment
-from .simulation import sim_data_N, _FWHM
+from .simulation import sim_data_N, calc_expected_R, _FWHM
 
 # Cross-section name order matches PolarizedNeutronProbe._xs_names
 _XS_NAMES: List[str] = ['mm', 'mp', 'pm', 'pp']
@@ -70,9 +69,9 @@ class PolarizedAutoReflExperiment(AutoReflExperiment):
             "PolarizedAutoReflExperiment requires a PolarizedNeutronProbe"
         )
 
-        # Call super with switch_penalty=0 (xs switching is free) and the
-        # single-model problem.  super().__init__ sets nmodels=1.
-        kwargs.setdefault('switch_penalty', 0.0)
+        # switch_penalty=1.0: all xs treated equally (no penalty for switching).
+        # Values >1 would bias toward staying on the current xs; 0.0 causes div/0.
+        kwargs.setdefault('switch_penalty', 1.0)
         super().__init__(problem, Q, instrument, **kwargs)
 
         self.polarization_states = polarization_states
@@ -131,94 +130,24 @@ class PolarizedAutoReflExperiment(AutoReflExperiment):
         for point_list in point_lists:
             for mp in point_list:
                 xs_name = _XS_NAMES[self.xs_indices[mp.base.model]]
-                mp.movements.update(self.polarization_states[xs_name])
+                for motor, val in self.polarization_states[xs_name].items():
+                    mp.movements += [motor, val]
         return point_lists
-
-
-class PolarizedSimReflExperiment(SimReflExperiment):
-    """Simulation-mode polarized experiment.
-
-    Identical structure to PolarizedAutoReflExperiment but inherits from
-    SimReflExperiment.  Overrides _simulate_datapoint to pick the correct
-    xs from experiment.reflectivity().
-    """
-
-    def __init__(
-        self,
-        problem: FitProblem,
-        Q: np.ndarray,
-        instrument: instrument_module.ReflectometerBase,
-        polarization_states: Dict[str, dict],
-        **kwargs,
-    ) -> None:
-        models = list(problem.models)
-        assert len(models) == 1, (
-            "PolarizedSimReflExperiment requires a FitProblem with exactly one model"
-        )
-        assert hasattr(models[0].probe, 'xs'), (
-            "PolarizedSimReflExperiment requires a PolarizedNeutronProbe"
-        )
-
-        kwargs.setdefault('switch_penalty', 0.0)
-        super().__init__(problem, Q, instrument, **kwargs)
-
-        self.polarization_states = polarization_states
-
-        probe = models[0].probe
-        self.xs_indices: List[int] = [
-            i for i, xs in enumerate(probe.xs) if xs is not None
-        ]
-        n = len(self.xs_indices)
-        assert n > 0, "PolarizedNeutronProbe has no active cross-sections"
-
-        base_model = self.models[0]
-        self.models = [base_model] * n
-        self.nmodels = n
-
-        base_Q = np.asarray(self.measQ[0])
-        self.measQ = np.broadcast_to(base_Q, (n, len(base_Q))).copy()
-        self.x = [self.x[0].copy() for _ in range(n)]
-        self.meas_bkg = np.full(n, self.meas_bkg[0])
-        self.resid_bkg = np.full(n, self.resid_bkg[0])
-
-    def update_models(self) -> None:
-        modeldata = self.get_data()
-        experiment = list(self.problem.models)[0]
-
-        for i, (measQ, (specdata, bkgpdata, bkgmdata)) in enumerate(
-            zip(self.measQ, modeldata)
-        ):
-            xs_probe = experiment.probe.xs[self.xs_indices[i]]
-            if xs_probe is None:
-                continue
-            spec = reduce(specdata, bkgpdata, bkgmdata)
-            if spec is None:
-                continue
-            mT = spec.sample.angle_x
-            mdT = spec.angular_resolution
-            mL = spec.detector.wavelength
-            mdL = spec.detector.wavelength_resolution
-            mR = spec.v
-            mdR = spec.dv
-            mQ = spec.Qz
-            mdQ = spec.dQ
-            xs_probe._set_TLR(mT, mdT * _FWHM, mL, mdL * _FWHM, mR, mdR, dQ=mdQ)
-            xs_probe._apply_oversamplings()
-            xs_probe.resolution = self.instrument.resolution
-
-        experiment.update()
-        self.problem.partial = True
-        self.problem.model_reset()
-        self.problem.chisq_str()
 
     def _simulate_datapoint(
         self,
         model_num: int,
         x: float,
         t: float,
-        intent: Intent,
+        intent: 'Intent',
         merit: Optional[float],
-    ) -> DataPoint:
+    ) -> 'DataPoint':
+        """Simulate a single measurement point for the polarized case.
+
+        Re-sets the probe T/L at the measurement angle x (so the Q grid matches
+        the instrument channels, not the measQ rebinning axis), then picks the
+        R array for the cross-section corresponding to model_num.
+        """
         T = self.instrument.T(x)[0]
         dT = self.instrument.dT(x)[0]
         L = self.instrument.L(x)[0]
@@ -227,14 +156,14 @@ class PolarizedSimReflExperiment(SimReflExperiment):
 
         incident_neutrons = intens * t
 
-        experiment = list(self.problem.models)[0]
-        # reflectivity() returns [R_mm, R_mp, R_pm, R_pp] for polarized probe
-        all_R = experiment.reflectivity()
-        calcR = all_R[self.xs_indices[model_num]]
+        # calc_expected_R returns one R per active xs in xs_indices order.
+        calcR = calc_expected_R(
+            self.calcmodels[0], T, dT, L, dL,
+            self.oversampling, self.instrument.resolution
+        )[model_num]
 
         Nspec, (Nbkg, _), Ninc = sim_data_N(
-            calcR,
-            incident_neutrons,
+            calcR, incident_neutrons,
             self.resid_bkg[model_num],
             self.meas_bkg[model_num],
         )

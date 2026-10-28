@@ -56,7 +56,9 @@ class SimReflExperiment(AutoReflBase):
         
         super().__init__(problem, Q, instrument, eta, npoints, switch_penalty,
                        switch_time_penalty, fit_options, entropy_options, oversampling,
-                       meas_bkg, startmodel, min_meas_time, select_pars, bestpars)
+                       meas_bkg=meas_bkg, startmodel=startmodel,
+                       min_meas_time=min_meas_time, select_pars=select_pars,
+                       bestpars=bestpars)
 
     def request_data(self, newpoints, foms) -> List[DataPoint]:
         """

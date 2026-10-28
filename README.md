@@ -76,19 +76,18 @@ pip install git+https://github.com/reductus/reductus.git
 
 ```
 AutoReflBase  (autorefl.py)
-├── SimReflExperiment         (simexp.py)      — pure simulation, no hardware
+├── SimReflExperiment         (simexp.py)      — legacy offline simulation
 │   └── SimReflExperimentControl               — fixed-scan control experiment
 ├── AutoReflExperiment        (autorefl.py)    — hardware measurement
 └── PolarizedAutoReflExperiment (polarized.py) — polarized beam, hardware
-    └── (PolarizedSimReflExperiment)           — polarized beam, simulation
 ```
 
 | Class | Use |
 |-------|-----|
-| `SimReflExperiment` | Simulate an autonomous experiment offline. Takes ground-truth `bestpars` and generates synthetic count data. |
-| `AutoReflExperiment` | Live experiment. `request_data()` produces `MeasurementPoint` objects to be dispatched to the NICE instrument queue. |
-| `PolarizedAutoReflExperiment` | Like `AutoReflExperiment` but maps cross-section slots (mm, mp, pm, pp) onto the multi-model FOM loop. |
-| `AutoReflLauncher` | Owns the `asyncio` event loop; drives fit → select → measure → ingest for hardware experiments. |
+| `AutoReflExperiment` | Live experiment. `request_data()` produces `MeasurementPoint` objects for the NICE instrument queue. Use with `SimulatedBackend` for offline simulation. |
+| `PolarizedAutoReflExperiment` | Like `AutoReflExperiment` but maps cross-section slots (mm, mp, pm, pp) onto the multi-model FOM loop. Also works with `SimulatedBackend`. |
+| `AutoReflLauncher` | Owns the `asyncio` event loop; drives fit → select → measure → ingest. |
+| `SimReflExperiment` | Legacy offline simulation class; use `AutoReflExperiment + SimulatedBackend` instead. |
 
 ---
 

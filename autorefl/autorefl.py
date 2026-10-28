@@ -10,7 +10,7 @@ from queue import Queue
 from bumps.initpop import generate
 
 from refl1d.names import FitProblem, Experiment
-from refl1d.probe.probe import OversampledRegion
+from refl1d.probe.probe import OversampledRegion, PolarizedNeutronProbe
 from scipy.interpolate import interp1d
 
 # local imports
@@ -18,11 +18,13 @@ from .entropy import calc_entropy, calc_init_entropy, default_entropy_options
 from .datastruct import DataPoint, ExperimentStep, Intent, MeasurementPoint
 from .reduction import DataPoint2ReflData, interpolate_background, reduce, ReflData
 from .inference import default_fit_options
-from .simulation import sim_data_N, calc_expected_R, _FWHM
+from .simulation import sim_data_N, calc_expected_R, _FWHM, _iter_subprobes
 from . import instrument
 
 if TYPE_CHECKING:
     from .fit_client import FitClient
+
+
 
 class AutoReflBase(object):
     """
@@ -117,7 +119,16 @@ class AutoReflBase(object):
 
         # Snapshot user-attached oversampled_regions before autorefl adds its own.
         # Used below to restore fit-path models when fit_oversampling=False.
-        _user_regions = [list(m.probe.oversampled_regions) for m in self.models]
+        # For PolarizedNeutronProbe, snapshot each active xs sub-probe separately,
+        # plus the parent probe (which _calculate_union reads for the dense grid).
+        _user_regions = [
+            [list(sub.oversampled_regions) for sub in _iter_subprobes(m.probe)]
+            for m in self.models
+        ]
+        _user_parent_regions = [
+            list(m.probe.oversampled_regions) if isinstance(m.probe, PolarizedNeutronProbe) else None
+            for m in self.models
+        ]
 
         # Replace random sub-point oversampling with a deterministic OversampledRegion
         # covering the full measurement Q range.  n = oversampling * len(measQ) gives
@@ -126,14 +137,24 @@ class AutoReflBase(object):
         # += preserves any regions the user already attached to the probe (e.g. via
         # probe.critical_edge()) before passing the problem in.
         for m, mQ in zip(self.models, self.measQ):
-            m.probe.oversampling = None
-            if oversampling is not None:
-                m.probe.oversampled_regions += [OversampledRegion(
+            for sub in _iter_subprobes(m.probe):
+                sub.oversampling = None
+                if oversampling is not None:
+                    sub.oversampled_regions += [OversampledRegion(
+                        Q_start=float(np.min(mQ)), Q_end=float(np.max(mQ)),
+                        n=oversampling * len(mQ),
+                    )]
+                sub._apply_oversamplings()
+                sub.resolution = self.instrument.resolution
+            # PolarizedNeutronProbe._calculate_union() uses the parent's
+            # oversampled_regions to build calc_Q, not the xs sub-probes'.
+            # Mirror the region to the parent so the dense grid is used.
+            if oversampling is not None and isinstance(m.probe, PolarizedNeutronProbe):
+                m.probe.oversampled_regions = [OversampledRegion(
                     Q_start=float(np.min(mQ)), Q_end=float(np.max(mQ)),
                     n=oversampling * len(mQ),
                 )]
-            m.probe._apply_oversamplings()
-            m.probe.resolution = self.instrument.resolution
+                m.probe._union_cache_key = None
             m.update()
 
         # define measurement space. Contains same number of points per model as self.measQ
@@ -223,13 +244,22 @@ class AutoReflBase(object):
         # only for simulation) retain the full-range region via the deepcopy above.
         # Set fit_oversampling=True to restore the original dense-everywhere behaviour.
         if not fit_oversampling and oversampling is not None:
-            for m, user_regions in zip(self.models, _user_regions):
-                m.probe.oversampled_regions = user_regions
-                m.probe._apply_oversamplings()
+            for m, sub_region_lists, parent_regions in zip(self.models, _user_regions, _user_parent_regions):
+                for sub, user_regions in zip(_iter_subprobes(m.probe), sub_region_lists):
+                    sub.oversampled_regions = user_regions
+                    sub._apply_oversamplings()
+                if isinstance(m.probe, PolarizedNeutronProbe):
+                    m.probe.oversampled_regions = parent_regions
+                    m.probe._union_cache_key = None
                 m.update()
 
         # add residual background
-        self.resid_bkg: np.ndarray = np.array([c.probe.background.value for c in self.calcmodels])
+        # For PolarizedNeutronProbe, background lives on each xs probe; average across
+        # active cross-sections so unshared (independent) backgrounds are all represented.
+        self.resid_bkg: np.ndarray = np.array([
+            np.mean([sp.background.value for sp in _iter_subprobes(c.probe)])
+            for c in self.calcmodels
+        ])
 
     async def setup(self, client: "FitClient") -> None:
         """Call /setup on the fit server to discover derived parameters and prior scales.
@@ -368,7 +398,7 @@ class AutoReflBase(object):
         init_qprof : list[np.ndarray]
         """
 
-        initpts = generate(self.problem, init='lhs', pop=-max(
+        initpts = generate(self.problem, init='lhs', pop=max(
                                        self.fit_options['pop'] * self.fit_options['steps'] / self.thinning,
                                        8 / (self.eta) ** (self.npoints - 1)
                                         ),
@@ -639,7 +669,14 @@ class AutoReflBase(object):
         switch_time_penalty = [0.0 if j == curmodel else self.switch_time_penalty for j in range(self.nmodels)]
 
         # Add all movement time penalties together.
-        movepenalty = [meastime / (meastime + bkgmeastime + self.instrument.movetime(x) + pen) for x, meastime, bkgmeastime, pen in zip(self.x, min_meas_times, min_bkgmeastimes, switch_time_penalty)]
+        # Guard: meastime may be inf (uninformative Q, mapped from meastime_meas=0/0)
+        # or denominator zero (current position with no background or switch time).
+        # Both produce NaN via inf/inf or 0/0; map these to 0.0 (don't measure there).
+        movepenalty = []
+        for x, meastime, bkgmeastime, pen in zip(self.x, min_meas_times, min_bkgmeastimes, switch_time_penalty):
+            denom = meastime + bkgmeastime + self.instrument.movetime(x) + pen
+            mp = np.divide(meastime, denom, out=np.zeros_like(denom), where=(denom > 0) & np.isfinite(denom))
+            movepenalty.append(mp)
 
         # Perform scaling
         scaled_foms = [fom * movepen for fom,movepen in zip(foms, movepenalty)]
@@ -1116,7 +1153,7 @@ class AutoReflBase(object):
 
         incident_neutrons = intens * t
         calcR = calc_expected_R(self.calcmodels[model_num], T, dT, L, dL,
-                                self.oversampling, self.instrument.resolution)
+                                self.oversampling, self.instrument.resolution)[0]
         Nspec, (Nbkg, _), Ninc = sim_data_N(calcR, incident_neutrons,
                                                     self.resid_bkg[model_num],
                                                     self.meas_bkg[model_num])

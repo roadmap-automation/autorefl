@@ -41,6 +41,6 @@ def _calc_qprofile(calcproblem, point):
         calcproblem.setp(point)
         calcproblem.chisq_str()
         Rth = calc_expected_R(m, *newvar, oversampling=calcproblem.oversampling, resolution=calcproblem.resolution)
-        qprof.append(Rth)
+        qprof.extend(Rth)
 
     return qprof

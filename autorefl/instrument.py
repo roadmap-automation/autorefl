@@ -74,7 +74,32 @@ class ReflectometerBase(object):
 
     def intensity(self, x):
         if self.s1_intens_calib is not None:
-            s1 = self.get_slits(np.array(x, ndmin=1))[0]
+            x_arr = np.array(x, ndmin=1)
+
+            if self.fixed_slits is not None:
+                # Fixed slits / flood beam: s1 is constant so interp returns a scalar.
+                # Tile to (N, D) manually, then apply footprint correction if sample_width is known.
+                s1_fixed, s2_fixed = self.fixed_slits[0], self.fixed_slits[1]
+                n = len(x_arr)
+                if self.intens_calib.ndim == 1:
+                    I = np.full((n, 1), np.interp(s1_fixed, self.s1_intens_calib, self.intens_calib))
+                else:
+                    I_total = np.array([np.interp(s1_fixed, self.s1_intens_calib, self.intens_calib[:, d])
+                                        for d in range(self.intens_calib.shape[1])])
+                    I = np.tile(I_total, (n, 1))
+
+                if np.isfinite(self.sample_width):
+                    # Footprint at sin(theta)=1, from the get_slits() geometry formula.
+                    # footprint(theta) = F0 / sin(theta); overflow when footprint > sample_width.
+                    F0 = s2_fixed * ((self._R12 + 1) * self._L2S / self._L12 + 1)
+                    sintheta = np.sin(np.radians(np.array(self.x2a(x_arr), ndmin=1)))
+                    correction = np.minimum(1.0, self.sample_width * sintheta / F0)
+                    I = I * correction[:, np.newaxis]
+
+                return I
+
+            # Variable slits: s1 tracks angle, shape is correct via ndmin=2 + transpose.
+            s1 = self.get_slits(x_arr)[0]
             if self.intens_calib.ndim == 1:
                 return np.array(np.interp(s1, self.s1_intens_calib, self.intens_calib), ndmin=2).T
             else:
@@ -96,8 +121,34 @@ class ReflectometerBase(object):
         return self.x2a(x)
 
     def dT(self, x):
-        usesample = True if self.footprint > self.sample_width else False 
-        return divergence(self.get_slits(x), self.get_slit_distances(), T=np.array(self.T(x)), sample_width=self.sample_width, use_sample=usesample)
+        if self.fixed_slits is not None and np.isfinite(self.sample_width):
+            # reflred.divergence() has "if False and use_sample" — sample correction
+            # is permanently disabled upstream.  Compute per-angle dT manually.
+            # At each angle the projected sample width W·sin(θ) acts as a virtual
+            # aperture at d=0; pair it with s1 (largest upstream slit) across the
+            # full s1–sample span to get the tightest resolution at each angle.
+            x_arr = np.array(x, ndmin=1)
+            T_arr = np.array(self.x2a(x_arr), ndmin=1)
+            s1_f, s2_f = self.fixed_slits[0], self.fixed_slits[1]
+            d1, d2 = self.get_slit_distances()[:2]          # negative (upstream)
+
+            def _sigma(sa, sb, da, db):
+                d = da - db
+                w = np.arctan(np.abs((sa + sb) / 2 / d))
+                t = np.arctan(np.abs((sa - sb) / 2 / d))
+                return np.sqrt((w ** 2 + t ** 2) / 6)      # 1-sigma radians
+
+            sample_proj = self.sample_width * np.abs(np.sin(np.radians(T_arr)))
+            sigma = np.minimum(
+                _sigma(s1_f, s2_f, d1, d2),                # s1–s2 pair (scalar)
+                _sigma(s1_f, sample_proj, d1, 0.0),        # s1–sample pair (N,)
+            )
+            return np.degrees(sigma)                        # 1-sigma degrees, (N,)
+
+        usesample = self.footprint > self.sample_width
+        return divergence(self.get_slits(x), self.get_slit_distances(),
+                          T=np.array(self.T(x)),
+                          sample_width=self.sample_width, use_sample=usesample)
 
     def L(self, x):
         
@@ -191,7 +242,11 @@ class ReflectometerBase(object):
             s4 = (s1 + s2) * (self._L2S + self._LS3 + self._L34) / self._L12 + s2 + self._S3Offset
 
         else:
-            s1, s2, s3, s4 = self.fixed_slits
+            n = len(np.array(x, ndmin=1))
+            s1 = np.full(n, self.fixed_slits[0])
+            s2 = np.full(n, self.fixed_slits[1])
+            s3 = np.full(n, self.fixed_slits[2])
+            s4 = np.full(n, self.fixed_slits[3])
 
         return s1, s2, s3, s4
 
@@ -526,9 +581,9 @@ class CANDOR(ReflectometerBase):
         with open('calibration/flowcell_d2o_r12_2_5_maxbeam_60_qoverlap0_751388_unpolarized_intensity.json', 'r') as f:
             d = json.load(f)
         
-        self.intens_calib = np.squeeze(np.array(d['outputs'][0]['v']))
-        self.dintens_calib = np.squeeze(np.array(d['outputs'][0]['dv']))
-        self.s1_intens_calib = np.squeeze(d['outputs'][0]['x'])
+        self.s1_intens_calib = np.atleast_1d(np.squeeze(d['outputs'][0]['x']))
+        self.intens_calib = np.atleast_2d(np.squeeze(np.array(d['outputs'][0]['v'])))
+        self.dintens_calib = np.atleast_2d(np.squeeze(np.array(d['outputs'][0]['dv'])))
         #ps1 = np.polynomial.polynomial.polyfit(s1, intens, 1)
 
         print(self.intens_calib.shape)

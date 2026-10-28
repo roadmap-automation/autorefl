@@ -34,7 +34,7 @@ from scipy.stats import chi2 as _chi2
 from bumps.fitters import DreamFit, MonitorRunner
 from bumps.initpop import generate
 from bumps.serialize import deserialize as bumps_deserialize
-from .simulation import calc_expected_R
+from .simulation import calc_expected_R, _iter_subprobes
 
 logger = logging.getLogger(__name__)
 
@@ -104,11 +104,16 @@ def _qprof_worker(point):
     _qprof_problem.setp(point)
     _qprof_problem.chisq_str()
 
-    qprof = [
-        calc_expected_R(m, *newvar,
-                        resolution=_qprof_problem.resolution)
-        for m, newvar in zip(mlist, _qprof_problem.calcTdTLdL)
-    ]
+    # For a polarized model, calc_expected_R returns a list of R arrays (one per active
+    # xs).  All xs share the same T/L, so we consume one calcTdTLdL entry per model and
+    # extend qprof with however many R arrays come back.
+    # calc_expected_R always returns a list: 1 element for unpolarized, n for polarized.
+    # Polarized models consume one calcTdTLdL entry (all xs share the same T/L).
+    qprof = []
+    tdtldl_iter = iter(_qprof_problem.calcTdTLdL)
+    for m in mlist:
+        newvar = next(tdtldl_iter)
+        qprof.extend(calc_expected_R(m, *newvar, resolution=_qprof_problem.resolution))
 
     derived = {}
     if _qprof_requested_labels and _qprof_molgroups_index is not None:
@@ -566,7 +571,9 @@ def _calc_qprofiles_sync(problem, draw_points: np.ndarray, calc_tdtldl,
     ) as executor:
         results = list(executor.map(_qprof_worker, draw_points))
 
-    nmodels = len(calc_tdtldl)
+    # For polarized models calc_expected_R extends qprof with one array per xs,
+    # so len(r[0]) may exceed len(calc_tdtldl).  Use the actual result length.
+    nmodels = len(results[0][0]) if results else 0
     qprofs = [np.array([r[0][i] for r in results]) for i in range(nmodels)]
 
     if requested_derived_labels:
@@ -650,7 +657,8 @@ async def post_fit(request: web.Request) -> web.Response:
             # evaluates reflectivity on the same dense calc_Q grid that was used
             # during simulation.
             for m in problem.models:
-                m.probe._apply_oversamplings()
+                for sub in _iter_subprobes(m.probe):
+                    sub._apply_oversamplings()
                 m.update()
             resolution = fields.get('resolution', 'normal')
             requested_derived_labels = json.loads(fields.get('requested_derived_labels', '[]'))
