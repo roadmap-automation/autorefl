@@ -110,20 +110,15 @@ def calc_entropy(pts, select_pars=None, options=default_entropy_options, predict
 
     # calculate entropy with selected method
     if options['method'] == 'mvn_fast':
-
-        # remove averages over all samples
-        A = A - np.mean(A, axis=-2, keepdims=True)
-
-        # calculate transpose (shape D x P x N)
-        A_T = np.swapaxes(A, -1, -2)
-
-        # Calculate covariance matrix (shape D X P X P)
-        covs = np.einsum('ikl,ilm->ikm', A_T, A, optimize='greedy') / (A_T.shape[-1] - 1)
-
-        # Alternate approach (slower for small arrays, faster for very large arrays)
-        #covs = list()
-        #for a in A_T:
-        #    covs.append(np.cov(a))
+        D, N, P = A.shape
+        covs = np.empty((D, P, P), dtype=A.dtype)
+        # Process D in chunks to avoid materialising a full D×N×P centred copy.
+        # Each chunk is centred, used to form (chunk, P, P), then freed.
+        chunk_d = max(1, (1 << 30) // (N * P * 8))  # ~1 GB per chunk
+        for lo in range(0, D, chunk_d):
+            hi = min(lo + chunk_d, D)
+            c = A[lo:hi] - A[lo:hi].mean(axis=-2, keepdims=True)
+            covs[lo:hi] = np.matmul(c.swapaxes(-1, -2), c) / (N - 1)
 
         # Calculate determinant (shape XD)
         _, dets = np.linalg.slogdet(covs)
