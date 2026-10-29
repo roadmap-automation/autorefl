@@ -92,6 +92,7 @@ class AutoReflBase(object):
         self.switch_penalty = switch_penalty
         self.switch_time_penalty = switch_time_penalty
         self.min_meas_time = min_meas_time
+        self.measq_entropy = True
 
         # Initialize the fit problem
         self.problem = problem
@@ -574,7 +575,7 @@ class AutoReflBase(object):
         if self.entropy_options['scale']:
             pts = copy.copy(pts) / self.par_scale[:, self.sel]
 
-        foms, meastimes, bkgmeastimes, _, newpoints = self._fom_from_draw(pts, step.qprofs, select_ci_level=0.68, meas_ci_level=self.eta, n_forecast=self.npoints, allow_repeat=allow_repeat, correct_meastime=True)
+        foms, meastimes, bkgmeastimes, _, newpoints = self._fom_from_draw(pts, step.qprofs, select_ci_level=0.68, meas_ci_level=self.eta, n_forecast=self.npoints, allow_repeat=allow_repeat, correct_meastime=True, measq_entropy=self.measq_entropy)
         print('Total figure of merit calculation time: %f' % (time.time() - init_time))
 
         # populate step foms
@@ -689,7 +690,8 @@ class AutoReflBase(object):
                         meas_ci_level: float = 0.68,
                         n_forecast: int = 1,
                         allow_repeat: bool = True,
-                        correct_meastime: bool = False) -> Tuple[List[List[np.ndarray]],
+                        correct_meastime: bool = False,
+                        measq_entropy: bool = True) -> Tuple[List[List[np.ndarray]],
                                                             List[List[np.ndarray]],
                                                             List[float],
                                                             List[Tuple[int, int, float, float]]]:
@@ -731,6 +733,9 @@ class AutoReflBase(object):
         xqbkgs = list()
         xdbkgs = list()
         xqprofs = list()
+        bin_idxs = list()
+        inc_measQs = list()
+        qprofs_clipped = list()
         init_time = time.time()
         modeldata = self.get_data()
         # True for TOF instruments (LIQREF) whose intensity() returns a ragged list;
@@ -824,6 +829,17 @@ class AutoReflBase(object):
             xqbkgs.append(xqbkg)
             xdbkgs.append(np.sqrt(xdbkg2))
 
+            if measq_entropy and not reshape_list:
+                _bin_idx = np.clip(np.searchsorted(Qth, q) - 1, 0, len(Qth) - 1)
+                _inc_measQ = np.zeros(len(Qth))
+                np.add.at(_inc_measQ, _bin_idx, incident_neutrons)
+            else:
+                _bin_idx = None
+                _inc_measQ = None
+            bin_idxs.append(_bin_idx)
+            inc_measQs.append(_inc_measQ)
+            qprofs_clipped.append(refl)
+
         print(f'Forecast setup time: {time.time() - init_time}')
 
         all_foms = list()
@@ -857,7 +873,8 @@ class AutoReflBase(object):
 
             all_H0.append(H0)
             # cycle though models
-            for incident_neutrons, init_shape, q, xqprof, xqbkg, xdbkg in zip(intensities, intens_shapes, qs, xqprofs, xqbkgs, xdbkgs):
+            for incident_neutrons, init_shape, q, xqprof, xqbkg, xdbkg, bin_idx, inc_measQ, qprof_sel in zip(
+                    intensities, intens_shapes, qs, xqprofs, xqbkgs, xdbkgs, bin_idxs, inc_measQs, qprofs_clipped):
 
                 #init_time2a = time.time()
                 # TODO: Shouldn't these already be sorted by the second step?
@@ -965,29 +982,89 @@ class AutoReflBase(object):
                     bkg_meas_time = np.array(bkg_meas_time)
 
                 else:
-                    # TODO: compute entropy at measQ resolution (485 bins) then broadcast back to XD
-                    # (26190 pts). A is 54x redundant because xqprof[:, k] == qprof[:, bin(k)] for all
-                    # wavelengths sharing a measQ bin. Plan: .claude/plans/autorefl-measq-fom-optimization.md
-                    Hs, _, predictor = calc_entropy(A, None, options=self.entropy_options, predictor=predictor)
+                    if measq_entropy:
+                        # Compute entropy at measQ resolution (485 bins) instead of at full
+                        # instrument-Q resolution (XD=26190). The A matrix at XD is 54x redundant
+                        # because xqprof[:, j] == qprof[:, bin_idx[j]] for all wavelengths sharing
+                        # a measQ bin. Working at measQ level then broadcasting back is equivalent
+                        # but ~54x cheaper for the A-matrix and calc_entropy calls.
+                        qprof_sorted_idx = np.argsort(qprof_sel, axis=0)  # (N, 485)
+                        A_measQ = np.take_along_axis(pts[:, None, :], qprof_sorted_idx[:, :, None], axis=0)[minci_sel:maxci_sel]
+                        A_measQ = np.moveaxis(A_measQ, -1, 1)  # (CI_sel, P, 485)
 
-                    if correct_meastime:
-                        # Per-bin correction consistent with the independent-channels FOM model:
-                        # each wavelength's dHdt is computed independently, so the correction is
-                        # also per-wavelength.  A joint criterion across multiple wavelengths
-                        # exponentially shrinks the surviving sample count and causes widespread
-                        # zeroing via the H0 fallback.
-                        min_samples = pts.shape[1] + 1  # MVN covariance needs P+1 points
-                        for k in range(len(meastime_sel)):
-                            if meastime_sel[k] < self.min_meas_time:
-                                newsigma = np.sqrt(med[k] / (incident_neutrons[k] * self.min_meas_time))
-                                newcrit = np.abs(xqprof[:, k] - med[k]) < 2 * newsigma
-                                if newcrit.sum() >= min_samples:
-                                    Hs[k] = calc_entropy(pts[newcrit], None, options=self.entropy_options, predictor=predictor)[0]
-                                # always correct the time regardless of sample count: when
-                                # newcrit is too tight to estimate Hs, keep original Hs[k] but
-                                # normalise by min_meas_time so dHdt isn't artificially inflated.
-                                meastime_sel[k] = self.min_meas_time
-                                meastime_meas[k] = self.min_meas_time
+                        Hs_measQ, _, predictor = calc_entropy(A_measQ, None, options=self.entropy_options, predictor=predictor)
+
+                        # measQ-level sigma and median for meastime computation
+                        med_measQ = np.median(qprof_sel, axis=0)  # (485,)
+                        meas_xqprof_measQ = np.take_along_axis(qprof_sel, qprof_sorted_idx[minci_meas:maxci_meas], axis=0)
+                        sel_xqprof_measQ = np.take_along_axis(qprof_sel, qprof_sorted_idx[minci_sel:maxci_sel], axis=0)
+                        meas_sigma_measQ = 0.5 * (np.max(meas_xqprof_measQ, axis=0) - np.min(meas_xqprof_measQ, axis=0))
+                        sel_sigma_measQ = 0.5 * (np.max(sel_xqprof_measQ, axis=0) - np.min(sel_xqprof_measQ, axis=0))
+
+                        # broadcast measQ → XD using bin_idx
+                        med = med_measQ[bin_idx]
+                        meas_sigma = meas_sigma_measQ[bin_idx]
+                        sel_sigma = sel_sigma_measQ[bin_idx]
+
+                        with np.errstate(divide='ignore', invalid='ignore'):
+                            meastime_sel = np.nan_to_num(
+                                1.0 / (incident_neutrons * med * (sel_sigma / med) ** 2),
+                                nan=np.inf, posinf=np.inf, neginf=np.inf)
+                            meastime_meas = np.nan_to_num(
+                                1.0 / (incident_neutrons * med * (meas_sigma / med) ** 2),
+                                nan=np.inf, posinf=np.inf, neginf=np.inf)
+                            t_bkg_mq = np.nan_to_num(
+                                1.0 / (incident_neutrons * xqbkg * (meas_sigma / xqbkg) ** 2),
+                                nan=0.0, posinf=0.0, neginf=0.0)
+                        bkg_meastime = np.clip(t_bkg_mq - t_0, a_min=0.0, a_max=None)
+
+                        if correct_meastime:
+                            min_samples = pts.shape[1] + 1
+                            # Correction loop at measQ resolution (485 bins, not 26190 XD points).
+                            # The aggregate meastime meastime_sel_mq uses inc_measQ (sum over all
+                            # channels in the bin), so it is ~D times shorter than per-channel
+                            # meastime. Recover the average per-channel meastime via channels_per_bin
+                            # for the condition check, matching the original XD-level logic.
+                            channels_per_bin = np.maximum(
+                                np.bincount(bin_idx, minlength=len(Qth)), 1)
+                            with np.errstate(divide='ignore', invalid='ignore'):
+                                agg_sel = np.nan_to_num(
+                                    1.0 / (inc_measQ * med_measQ * (sel_sigma_measQ / med_measQ) ** 2),
+                                    nan=np.inf, posinf=np.inf, neginf=np.inf)
+                            meastime_sel_cond = agg_sel * channels_per_bin  # avg per-channel
+                            corrected_bins = np.zeros(len(Qth), dtype=bool)
+                            for k in range(len(Hs_measQ)):
+                                if meastime_sel_cond[k] < self.min_meas_time:
+                                    avg_inc_k = inc_measQ[k] / channels_per_bin[k]
+                                    newsigma = np.sqrt(med_measQ[k] / (avg_inc_k * self.min_meas_time))
+                                    newcrit = np.abs(qprof_sel[:, k] - med_measQ[k]) < 2 * newsigma
+                                    if newcrit.sum() >= min_samples:
+                                        Hs_measQ[k] = calc_entropy(pts[newcrit], None, options=self.entropy_options, predictor=predictor)[0]
+                                    corrected_bins[k] = True
+                            # Apply min_meas_time only to XD points whose measQ bin was corrected.
+                            # Uncorrected bins keep their per-channel meastime_sel from above.
+                            should_correct = corrected_bins[bin_idx]
+                            meastime_sel = np.where(should_correct, self.min_meas_time, meastime_sel)
+                            meastime_meas = np.where(should_correct, self.min_meas_time, meastime_meas)
+
+                        # Clip Hs to H0: Hs_measQ[k] can exceed H0 for uninformative bins
+                        # (near-constant qprof → noisy sort → random CI subset → inflated
+                        # sample covariance). Negative information gain is unphysical; zero it.
+                        Hs = np.minimum(Hs_measQ, H0)[bin_idx]
+
+                    else:
+                        Hs, _, predictor = calc_entropy(A, None, options=self.entropy_options, predictor=predictor)
+
+                        if correct_meastime:
+                            min_samples = pts.shape[1] + 1
+                            for k in range(len(meastime_sel)):
+                                if meastime_sel[k] < self.min_meas_time:
+                                    newsigma = np.sqrt(med[k] / (incident_neutrons[k] * self.min_meas_time))
+                                    newcrit = np.abs(xqprof[:, k] - med[k]) < 2 * newsigma
+                                    if newcrit.sum() >= min_samples:
+                                        Hs[k] = calc_entropy(pts[newcrit], None, options=self.entropy_options, predictor=predictor)[0]
+                                    meastime_sel[k] = self.min_meas_time
+                                    meastime_meas[k] = self.min_meas_time
 
                     # figure of merit is dHdt (reshaped to X x D)
                     dHdt = (H0 - Hs) / meastime_sel
@@ -1068,6 +1145,7 @@ class AutoReflBase(object):
 
             # set up next iteration
             xqprofs = newxqprofs
+            qprofs_clipped = [qpc[chosen] for qpc in qprofs_clipped]
             pts = newpts
 
             print(f'Forecast step {i}:\tNumber of samples: {N}\tCalculation time: {time.time() - init_time}')
