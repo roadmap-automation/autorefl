@@ -3,7 +3,7 @@ import json
 import warnings
 from typing import Tuple, List, Union
 from reductus.reflred.candor import edges, Candor
-from reductus.reflred.resolution import divergence
+from reductus.reflred.resolution import divergence_simple
 from reductus.reflred.intent import Intent
 from reductus.reflred.nexusref import NCNRNeXusRefl, load_nexus_entries
 from reductus.reflred.refldata import ReflData, Monitor, Detector, Sample, Slit, Monochromator
@@ -121,34 +121,18 @@ class ReflectometerBase(object):
         return self.x2a(x)
 
     def dT(self, x):
-        if self.fixed_slits is not None and np.isfinite(self.sample_width):
-            # reflred.divergence() has "if False and use_sample" — sample correction
-            # is permanently disabled upstream.  Compute per-angle dT manually.
-            # At each angle the projected sample width W·sin(θ) acts as a virtual
-            # aperture at d=0; pair it with s1 (largest upstream slit) across the
-            # full s1–sample span to get the tightest resolution at each angle.
-            x_arr = np.array(x, ndmin=1)
-            T_arr = np.array(self.x2a(x_arr), ndmin=1)
-            s1_f, s2_f = self.fixed_slits[0], self.fixed_slits[1]
-            d1, d2 = self.get_slit_distances()[:2]          # negative (upstream)
-
-            def _sigma(sa, sb, da, db):
-                d = da - db
-                w = np.arctan(np.abs((sa + sb) / 2 / d))
-                t = np.arctan(np.abs((sa - sb) / 2 / d))
-                return np.sqrt((w ** 2 + t ** 2) / 6)      # 1-sigma radians
-
-            sample_proj = self.sample_width * np.abs(np.sin(np.radians(T_arr)))
-            sigma = np.minimum(
-                _sigma(s1_f, s2_f, d1, d2),                # s1–s2 pair (scalar)
-                _sigma(s1_f, sample_proj, d1, 0.0),        # s1–sample pair (N,)
-            )
-            return np.degrees(sigma)                        # 1-sigma degrees, (N,)
-
-        usesample = self.footprint > self.sample_width
-        return divergence(self.get_slits(x), self.get_slit_distances(),
-                          T=np.array(self.T(x)),
-                          sample_width=self.sample_width, use_sample=usesample)
+        x_arr = np.array(x, ndmin=1)
+        if self.fixed_slits is not None:
+            s1, s2 = self.fixed_slits[0], self.fixed_slits[1]
+        else:
+            s1, s2 = self.get_slits(x_arr)[:2]
+        d1, d2 = self.get_slit_distances()[:2]
+        usesample = np.isfinite(self.sample_width) and (
+            self.fixed_slits is not None or self.footprint > self.sample_width
+        )
+        return divergence_simple([s1, s2], [d1, d2],
+                                 T=np.array(self.T(x_arr)),
+                                 sample_width=self.sample_width, use_sample=usesample)
 
     def L(self, x):
         
