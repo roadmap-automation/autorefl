@@ -1,7 +1,9 @@
 from typing import List
 from pathlib import Path
 
+import logging
 import time
+import traceback
 import asyncio
 from aiohttp import web
 import socketio
@@ -11,11 +13,39 @@ from autorefl.remote.util import StoppableThread
 from autorefl.datastruct import MeasurementPoint
 
 _HERE = Path(__file__).parent
+log = logging.getLogger(__name__)
 
 sio = socketio.AsyncServer(async_mode='aiohttp')
 app = web.Application()
 sio.attach(app)
-sockethistory: list = []
+
+# Stateful snapshot store — replaces the flat sockethistory list.
+# Snapshot events: only the latest payload matters for the display.
+_SNAPSHOT_EVENTS = frozenset({
+    'autorefl_data', 'autorefl_profiles',
+    'autorefl_convergence', 'autorefl_fom',
+    'queue_update',
+})
+_snapshots: dict = {}     # event_name -> latest payload
+_step_history: list = []  # new_step payloads in order (one per experiment step)
+_fit_log: list = []       # bounded ring of fit_update strings
+_MAX_FIT_LOG = 200
+
+def _record_state(event: str, data) -> None:
+    if event in _SNAPSHOT_EVENTS:
+        _snapshots[event] = data
+    elif event == 'new_step':
+        _step_history.append(data)
+    elif event == 'fit_update':
+        _fit_log.append(data)
+        if len(_fit_log) > _MAX_FIT_LOG:
+            _fit_log.pop(0)
+
+def _clear_state() -> None:
+    _snapshots.clear()
+    _step_history.clear()
+    _fit_log.clear()
+
 
 async def hello(request):
     return web.FileResponse(_HERE / 'socketpage.html')
@@ -26,24 +56,41 @@ app.add_routes([web.static('/lib', _HERE / 'lib')])
 async def emit_history(event, data, sid=None):
     try:
         await asyncio.wait_for(sio.emit(event, data, to=sid), timeout=5.0)
-        sockethistory.append((event, data))
+        _record_state(event, data)
     except Exception:
-        import logging, traceback
-        logging.getLogger(__name__).debug('emit_history failed: %s', traceback.format_exc())
+        log.warning('emit_history(%s) failed: %s', event, traceback.format_exc())
 
 async def emit_clear():
-    """Emit 'clear' and prune sockethistory so reconnecting clients start fresh."""
-    sockethistory.clear()
-    await emit_history('clear', None)
+    """Emit 'clear' to all clients and reset snapshot state."""
+    _clear_state()
+    try:
+        await asyncio.wait_for(sio.emit('clear', None), timeout=5.0)
+    except Exception:
+        log.warning('emit_clear failed: %s', traceback.format_exc())
 
 @sio.on('connect')
 async def dump_history(sid, data):
-    print(f'New connection from {sid}')
-    for item in sockethistory:
+    log.info('New connection from %s', sid)
+    # Fixed replay order ensures a consistent client state:
+    #   1. clear   — reset client UI
+    #   2. new_step events in order — rebuild step structure
+    #   3. profiles then data — data clears plotdata.queue, so it must precede queue_update
+    #   4. convergence, FOM, queue
+    #   5. recent fit log text
+    replay = [('clear', None)]
+    for step_data in _step_history:
+        replay.append(('new_step', step_data))
+    for event in ('autorefl_profiles', 'autorefl_data', 'autorefl_convergence', 'autorefl_fom', 'queue_update'):
+        if event in _snapshots:
+            replay.append((event, _snapshots[event]))
+    for msg in _fit_log:
+        replay.append(('fit_update', msg))
+
+    for event, payload in replay:
         try:
-            await asyncio.wait_for(sio.emit(*item, to=sid), timeout=5.0)
+            await asyncio.wait_for(sio.emit(event, payload, to=sid), timeout=5.0)
         except Exception:
-            break
+            log.warning('dump_history(%s): failed to replay %s, continuing: %s', sid, event, traceback.format_exc())
 
 class SocketServer(StoppableThread):
 

@@ -157,6 +157,12 @@ class AutoReflLauncher:
                 data = await self.backend.measure(points)
                 self._load_data(data)
 
+                try:
+                    await emit_history('autorefl_data', self.update_plot_data())
+                except Exception:
+                    import traceback
+                    traceback.print_exc()
+
                 if self.backend.last_x is not None:
                     self.exp.instrument.x = self.backend.last_x
 
