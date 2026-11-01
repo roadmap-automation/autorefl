@@ -158,7 +158,7 @@ class AutoReflLauncher:
                 self._load_data(data)
 
                 try:
-                    await emit_history('autorefl_data', self.update_plot_data())
+                    await emit_history('autorefl_data', self.update_plot_data(mark_new_step=True))
                 except Exception:
                     import traceback
                     traceback.print_exc()
@@ -242,15 +242,33 @@ class AutoReflLauncher:
             for s, step_foms in enumerate(all_foms)
         ])
 
-    def update_plot_data(self) -> str:
-        from autorefl.reduction import reduce
-        plotdata = {'data': []}
-        for specdata, bkgpdata, bkgmdata in self.exp.get_data():
-            refl = reduce(specdata, bkgpdata, bkgmdata)
+    def update_plot_data(self, mark_new_step: bool = False) -> str:
+        from autorefl.reduction import reduce, DataPoint2ReflData
+        from autorefl.datastruct import Intent
+
+        steps = self.exp.steps
+        if mark_new_step and steps:
+            old_steps, new_steps = steps[:-1], steps[-1:]
+        else:
+            old_steps, new_steps = steps, []
+
+        plotdata = {'data': [], 'new_data': []}
+        for i, mQ in enumerate(self.exp.measQ):
+            def _reduce(step_list, _i=i, _mQ=mQ):
+                spec = DataPoint2ReflData(_mQ, [pt for s in step_list for pt in s.points if pt.model == _i and pt.intent == Intent.spec])
+                bkgp = DataPoint2ReflData(_mQ, [pt for s in step_list for pt in s.points if pt.model == _i and pt.intent == Intent.backp])
+                bkgm = DataPoint2ReflData(_mQ, [pt for s in step_list for pt in s.points if pt.model == _i and pt.intent == Intent.backm])
+                return reduce(spec, bkgp, bkgm)
+
+            refl = _reduce(old_steps)
             if refl is not None:
-                plotdata['data'].append({'x': list(refl.x), 'v': list(refl.v), 'dv': list(refl.dv)})
-            else:
-                plotdata['data'].append(None)
+                plotdata['data'].append({'model': i, 'x': list(refl.x), 'v': list(refl.v), 'dv': list(refl.dv)})
+
+            if new_steps:
+                refl_new = _reduce(new_steps)
+                if refl_new is not None:
+                    plotdata['new_data'].append({'model': i, 'x': list(refl_new.x), 'v': list(refl_new.v), 'dv': list(refl_new.dv)})
+
         return json.dumps(plotdata)
 
     def update_plot_profiles(self, allqprofs) -> str:

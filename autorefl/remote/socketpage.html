@@ -116,7 +116,9 @@
         
         function makePlot(data) {
             var traces = [];
-            Object.values(data['data']).forEach((ptdata, idx) => {
+            Object.values(data['data'] || []).forEach((ptdata, idx) => {
+                if (ptdata === null) return;
+                const colorIdx = (ptdata['model'] !== undefined) ? ptdata['model'] : idx;
                 traces.push({
                     x: ptdata['x'],
                     y: ptdata['v'],
@@ -125,16 +127,37 @@
                         array: ptdata['dv'],
                         visible: true
                     },
-                    line: {
-                        color: CB_color_cycle[idx]
-                    },
+                    marker: {color: CB_color_cycle[colorIdx % CB_color_cycle.length]},
                     showlegend: false,
-                    name: 'model ' + idx,
+                    name: 'model ' + colorIdx,
                     mode: 'markers',
                     type: 'scatter'
                 })
             })
-            Object.values(data['ci']).forEach((ptdata, idx) => {
+            Object.values(data['new_data'] || []).forEach((ptdata, idx) => {
+                if (ptdata === null) return;
+                const colorIdx = (ptdata['model'] !== undefined) ? ptdata['model'] : idx;
+                traces.push({
+                    x: ptdata['x'],
+                    y: ptdata['v'],
+                    error_y: {
+                        type: 'data',
+                        array: ptdata['dv'],
+                        visible: true,
+                        color: CB_color_cycle[colorIdx % CB_color_cycle.length]
+                    },
+                    marker: {
+                        symbol: 'x', size: 8,
+                        color: CB_color_cycle[colorIdx % CB_color_cycle.length],
+                        line: {width: 2, color: CB_color_cycle[colorIdx % CB_color_cycle.length]}
+                    },
+                    showlegend: false,
+                    name: 'new (model ' + colorIdx + ')',
+                    mode: 'markers',
+                    type: 'scatter'
+                })
+            })
+            Object.values(data['ci'] || []).forEach((ptdata, idx) => {
                 traces.push({
                     x: ptdata['x'],
                     y: ptdata['68']['lower'],
@@ -220,7 +243,7 @@
         }
 
         function reset_plotdata() {
-            plotdata = {'data': [], 'ci': [], 'queue': []};
+            plotdata = {'data': [], 'ci': [], 'queue': [], 'new_data': []};
         };
 
         function renderPlot() {
