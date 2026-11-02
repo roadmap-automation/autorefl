@@ -181,7 +181,9 @@ class NICECampaignTask(Task):
         )
     """
 
-    def __init__(self, motors_to_move: List[str], filename: str) -> None:
+    def __init__(self, motors_to_move: List[str], filename: str, name: str = 'AutoReflCampaign') -> None:
+        Task.__init__(self)
+        self.name = name
         self.motors_to_move = motors_to_move + ['counter', 'pointDetector']
         self.filename = filename
         self.last_x = None
