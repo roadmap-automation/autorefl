@@ -465,7 +465,7 @@ class MAGIK(ReflectometerBase):
         """
 
         return ['detectorAngle', 'sampleAngle', 'slitAperture1', 'slitAperture2', 'slitAperture3',
-                'slitAperture4', 'counter', 'pointDetector'] + self._flipper_motor_names()
+                'slitAperture4'] + self._flipper_motor_names()
 
     def trajectoryData(self, x, intent, dtheta_bkg=0.5) -> List[str]:
         """
@@ -625,7 +625,7 @@ class CANDOR(ReflectometerBase):
         """
 
         return ['detectorArmAngle', 'sampleAngle', 'slitAperture1', 'slitAperture2',
-                'slitAperture3', 'counter', 'multiDetector'] + self._flipper_motor_names()
+                'slitAperture3'] + self._flipper_motor_names()
 
     def trajectoryData(self, x, intent, dtheta_bkg=0.5) -> List[str]:
         """
