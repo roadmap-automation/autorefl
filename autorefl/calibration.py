@@ -39,9 +39,9 @@ def calibrate_intensity(instrument, template: dict | Template, file_infos: list[
     slit_idx = slit_indices[0]
     config = generate_config_by_intent(file_infos, template)
 
-    results = process_template(template, config['local_config'], target=(slit_idx, 'output'))
+    bundle = process_template(template, config['local_config'], target=(slit_idx, 'output'))
+    results = bundle.values if hasattr(bundle, 'values') else bundle
 
-    # process_template returns a list of ReflData, one per file entry
     if not results:
         raise ValueError("SLIT loader returned no data — check file_infos and template")
 
