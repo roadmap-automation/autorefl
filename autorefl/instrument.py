@@ -4,7 +4,7 @@ import warnings
 from pathlib import Path
 from typing import Tuple, List, Union
 
-_CALIBRATION_DIR = Path(__file__).parent / 'calibration'
+_CALIBRATION_DIR = Path(__file__).parent.parent / 'calibration'
 from reductus.reflred.candor import edges, Candor
 from reductus.reflred.resolution import divergence_simple
 from reductus.reflred.intent import Intent
