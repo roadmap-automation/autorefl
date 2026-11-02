@@ -543,7 +543,7 @@ class CANDOR(ReflectometerBase):
         self._L34 = 3000.
         self.footprint = 45.
         self._S3Offset = 5.0
-        self._R12 = 2.5
+        self._R12 = 5.0
         self.detector_mask = 8.0
         self.sample_width = np.inf
 
