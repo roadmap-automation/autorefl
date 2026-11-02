@@ -1,7 +1,10 @@
 import numpy as np
 import json
 import warnings
+from pathlib import Path
 from typing import Tuple, List, Union
+
+_CALIBRATION_DIR = Path(__file__).parent / 'calibration'
 from reductus.reflred.candor import edges, Candor
 from reductus.reflred.resolution import divergence_simple
 from reductus.reflred.intent import Intent
@@ -395,7 +398,7 @@ class MAGIK(ReflectometerBase):
 
         # load calibration files
         try:
-            d_intens = np.loadtxt('calibration/magik_intensity_hw106.refl')
+            d_intens = np.loadtxt(_CALIBRATION_DIR / 'magik_intensity_hw106.refl')
             self.d_intens = d_intens
             self.p_intens, self.p_intens_cov = np.polyfit(d_intens[:,0], d_intens[:,1], 3, w=1/d_intens[:,2], cov='unscaled')
         except OSError:
@@ -557,12 +560,12 @@ class CANDOR(ReflectometerBase):
         self._data_loader = Candor
 
         # load wavelength calibration
-        wvcal = np.flipud(np.loadtxt(f'calibration/DetectorWavelengths_PG_integrate_sumeff_bank{bank}.csv', delimiter=',', usecols=[1, 2]))
+        wvcal = np.flipud(np.loadtxt(_CALIBRATION_DIR / f'DetectorWavelengths_PG_integrate_sumeff_bank{bank}.csv', delimiter=',', usecols=[1, 2]))
         self._L = wvcal[:,0]
         self._dL = wvcal[:,1]
 
         # load intensity calibration
-        with open('calibration/flowcell_d2o_r12_2_5_maxbeam_60_qoverlap0_751388_unpolarized_intensity.json', 'r') as f:
+        with open(_CALIBRATION_DIR / 'flowcell_d2o_r12_2_5_maxbeam_60_qoverlap0_751388_unpolarized_intensity.json', 'r') as f:
             d = json.load(f)
         
         self.s1_intens_calib = np.atleast_1d(np.squeeze(d['outputs'][0]['x']))
