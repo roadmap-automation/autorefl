@@ -54,7 +54,10 @@ def calibrate_intensity(instrument, template: dict | Template, file_infos: list[
         v_parts.append(v)
 
     s1_all = np.concatenate(s1_parts)
-    v_all = np.concatenate(v_parts, axis=0)  # shape (N,) or (N, D)
+    v_all = np.concatenate(v_parts, axis=0)  # shape (N,) or (N, D) or (N, D, 1) from reductus
+    # Reductus sometimes emits an extra trailing size-1 pixel axis; strip it.
+    while v_all.ndim > 2 and v_all.shape[-1] == 1:
+        v_all = v_all[..., 0]
 
     order = np.argsort(s1_all)
     instrument.s1_intens_calib = s1_all[order]
