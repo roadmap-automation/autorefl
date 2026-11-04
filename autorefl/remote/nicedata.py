@@ -231,6 +231,8 @@ class NICECampaignTask(Task):
             self.api.measurement_end()
 
     def _move_count(self, pt: 'MeasurementPoint', data: Dict[int, List['DataPoint']]) -> None:
+        if pt.base.x < 0:
+            return
         init_time = time.time()
         self.api.move(pt.movements)
         pt.base.movet = time.time() - init_time
