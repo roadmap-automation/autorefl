@@ -48,8 +48,8 @@ def calibrate_intensity(instrument, template: dict | Template, file_infos: list[
     s1_parts = []
     v_parts = []
     for rd in results:
-        x = np.asarray(rd.x, ndmin=1)
-        v = np.asarray(rd.v, ndmin=1)
+        x = np.array(rd.x, ndmin=1)
+        v = np.array(rd.v, ndmin=1)
         s1_parts.append(x)
         v_parts.append(v)
 
