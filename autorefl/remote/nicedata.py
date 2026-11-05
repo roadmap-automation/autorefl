@@ -209,13 +209,13 @@ class NICECampaignTask(Task):
         return await asyncio.to_thread(self._data_out.get)
 
     def terminate_count(self) -> None:
-        if self._active_count is not None and not self._active_count.isFinished():
+        if self._active_count is not None:
             self.api.terminateCount()
 
     def stop(self) -> None:
         self._stop_event.set()
         self._points_in.put(None)  # unblock any waiting get()
-        if self._active_count is not None and not self._active_count.isFinished():
+        if self._active_count is not None:
             self.api.terminateCount()
 
     def run(self) -> None:
@@ -257,14 +257,16 @@ class NICECampaignTask(Task):
         self._count(pt, data)
 
     def _count(self, pt: 'MeasurementPoint', data: Dict[int, List['DataPoint']]) -> None:
-        self._active_count = self.api.measurement_count(
-            filePrefix=self.filename,
-            entry=_NICE_ENTRY.get(pt.base.intent, pt.base.intent),
-            presetTime=pt.base.t,
-            wait=False,
-        )
-        self.api.wait(self._active_count)
-        self._active_count = None
+        self._active_count = True
+        try:
+            self.api.measurement_count(
+                filePrefix=self.filename,
+                entry=_NICE_ENTRY.get(pt.base.intent, pt.base.intent),
+                presetTime=pt.base.t,
+                wait=True,
+            )
+        finally:
+            self._active_count = None
 
         detector = self.api.read('counter.countAgainstDetector')
         counts = [int(c) for c in self.api.read(f'{detector}.counts')]
