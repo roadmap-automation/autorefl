@@ -9,27 +9,28 @@ def _iter_subprobes(probe):
         return [xs for xs in probe.xs if xs is not None]
     return [probe]
 
+# numpy's Poisson RNG overflows above ~2^31; Gaussian is indistinguishable from
+# Poisson at high counts anyway, so switch well below that limit.
+_POISSON_MAX_LAM = 1e8
+
+def _rvs(lam):
+    """Poisson sample, falling back to Gaussian for large lambda."""
+    lam = np.asarray(lam, dtype=np.float64)
+    if np.any(lam > _POISSON_MAX_LAM):
+        return norm.rvs(loc=lam, scale=np.sqrt(np.maximum(lam, 0.0)), size=lam.shape)
+    return poisson.rvs(lam, size=lam.shape)
+
+
 def sim_data_N(R, incident_neutrons: np.ndarray, resid_bkg=0.0, meas_bkg=0.0):
     R = np.array(R, ndmin=1)
-    _bR = np.ones_like(R)*(meas_bkg - resid_bkg)*incident_neutrons
-    _R = (R + meas_bkg - resid_bkg)*incident_neutrons
+    _bR = np.ones_like(R, dtype=np.float64) * (meas_bkg - resid_bkg) * incident_neutrons
+    _R = (R + meas_bkg - resid_bkg) * np.asarray(incident_neutrons, dtype=np.float64)
+    _Ninc = np.asarray(incident_neutrons, dtype=np.float64)
 
-    # np.float64 type avoids ValueError: lam is too large
-    _R.astype(np.float64)
-    N = poisson.rvs(_R, size=_R.shape)
-
-    _bR.astype(np.float64)
-    bNp = poisson.rvs(_bR, size=_bR.shape)
-    bNm = poisson.rvs(_bR, size=_bR.shape)
-
-    _Ninc = np.array(incident_neutrons, ndmin=1)
-    _Ninc.astype(np.float64)
-    try:
-        Ninc = poisson.rvs(_Ninc, size=_Ninc.shape)
-    except ValueError:
-        print(_Ninc)
-        print('warning: switching to Gaussian point simulator')
-        Ninc = norm.rvs(_Ninc, size=_Ninc.shape)
+    N    = _rvs(_R)
+    bNp  = _rvs(_bR)
+    bNm  = _rvs(_bR)
+    Ninc = _rvs(_Ninc)
 
     return N, (bNp, bNm), Ninc
 
