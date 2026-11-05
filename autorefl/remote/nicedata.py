@@ -233,8 +233,16 @@ class NICECampaignTask(Task):
             self.api.measurement_end()
 
     def _move_count(self, pt: 'MeasurementPoint', data: Dict[int, List['DataPoint']]) -> None:
-        if pt.base.x < 0:
-            return
+        try:
+            sa_idx = pt.movements.index('sampleAngle')
+            if float(pt.movements[sa_idx + 1]) < 0:
+                LOG.info(
+                    'Skipping point: sampleAngle=%s < 0 (x=%.4f intent=%s)',
+                    pt.movements[sa_idx + 1], pt.base.x, pt.base.intent,
+                )
+                return
+        except (ValueError, IndexError):
+            pass
         init_time = time.time()
         self.api.move(pt.movements)
         pt.base.movet = time.time() - init_time
