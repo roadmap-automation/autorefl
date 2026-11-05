@@ -225,40 +225,20 @@ class NICECampaignTask(Task):
             self.api.terminateCount()
 
     def _capture_snapshot(self) -> None:
-        """Snapshot the campaign file for reductus by copying via the writer's open h5py handle.
+        """Point _snapshot_path at the writer's live_data_path.
 
-        On Windows the HDF5 writer opens the file with exclusive access (no
-        FILE_SHARE_READ), so any external open — including shutil.copy2 or
-        open('rb') — raises PermissionError.  Using the writer's existing
-        h5py.File object avoids a second CreateFile call entirely; we write the
-        copy to a new shadow file that reductus can open freely.
+        write_nexus.Writer._make_copy() atomically publishes the campaign file
+        to live_data_path after every count.  By the time _capture_snapshot
+        runs (after all points in a step complete), that copy is current and
+        not writer-locked, so reductus can open it freely.
         """
         if self._campaign_filepath is None:
             return
-        shadow = self._campaign_filepath + '.snapshot.nxs'
-        try:
-            import h5py
-            if self._writer is None:
-                LOG.warning('_capture_snapshot: no writer reference — was writer= passed to NICECampaignTask?')
-                self._snapshot_path = None
-                return
-            open_keys = list(self._writer._open_files.keys())
-            h5file = self._writer._open_files.get(self._campaign_filepath)
-            if h5file is None:
-                LOG.warning(
-                    '_capture_snapshot: key mismatch — campaign_filepath=%r, _open_files keys=%r',
-                    self._campaign_filepath, open_keys,
-                )
-                self._snapshot_path = None
-                return
-            h5file.flush()
-            with h5py.File(shadow, 'w') as dst:
-                for key in h5file:
-                    h5file.copy(key, dst)
-                dst.attrs.update(h5file.attrs)
-            self._snapshot_path = shadow
-        except Exception as e:
-            LOG.warning('_capture_snapshot: failed (%s) — reductus skipped this step', e)
+        live = getattr(self._writer, 'live_data_path', None) if self._writer is not None else None
+        if live:
+            self._snapshot_path = live
+        else:
+            LOG.warning('_capture_snapshot: writer live_data_path unavailable — reductus skipped this step')
             self._snapshot_path = None
 
     def run(self) -> None:
