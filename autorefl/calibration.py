@@ -62,3 +62,12 @@ def calibrate_intensity(instrument, template: dict | Template, file_infos: list[
     order = np.argsort(s1_all)
     instrument.s1_intens_calib = s1_all[order]
     instrument.intens_calib = v_all[order] if v_all.ndim == 1 else v_all[order, :]
+
+    import logging as _logging
+    _log = _logging.getLogger(__name__)
+    _log.info(
+        'calibrate_intensity: s1_intens_calib shape=%s, intens_calib shape=%s\ns1 values: %s',
+        instrument.s1_intens_calib.shape,
+        instrument.intens_calib.shape,
+        instrument.s1_intens_calib,
+    )
