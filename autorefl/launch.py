@@ -76,6 +76,31 @@ class AutoReflLauncher:
             if step_id < len(self.exp.steps):
                 self.exp.steps[step_id].points = points
 
+    def _save_checkpoint(self, step_k: int) -> None:
+        """Write collected DataPoints for step_k to a JSON file in the campaign directory.
+
+        Each record contains x, t, intent, per-channel N (counts) and Ninc
+        (calibrated incident flux × time from instrument.intensity) so the
+        data can be verified independently before it enters the fitter.
+        """
+        from autorefl.datastruct import data_attributes
+        step = self.exp.steps[step_k]
+        records = []
+        for pt in step.points:
+            record = {
+                'x': float(pt.x),
+                't': float(pt.t),
+                'model': int(pt.model),
+                'intent': str(pt.intent),
+            }
+            for attr in data_attributes:
+                record[attr] = np.array(getattr(pt, attr)).ravel().tolist()
+            records.append(record)
+        path = os.path.join(self.pathname, f'checkpoint_step_{step_k:04d}.json')
+        with open(path, 'w') as f:
+            json.dump({'step': step_k, 'n_points': len(records), 'points': records}, f, indent=2)
+        print(f'AutoLauncher: checkpoint saved — step {step_k}, {len(records)} point(s) → {path}', flush=True)
+
     async def run(self) -> None:
         def _log_socket_error(task):
             if not task.cancelled() and task.exception() is not None:
@@ -156,6 +181,7 @@ class AutoReflLauncher:
 
                 data = await self.backend.measure(points)
                 self._load_data(data)
+                self._save_checkpoint(k)
 
                 try:
                     await emit_history('autorefl_data', self.update_plot_data(mark_new_step=True))
