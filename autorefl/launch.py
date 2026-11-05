@@ -309,6 +309,24 @@ class AutoReflLauncher:
         from autorefl.reduction import reduce, DataPoint2ReflData
         from autorefl.datastruct import Intent
 
+        # Reductus path: use the already-reduced R(Q) from the template directly.
+        reduced = self.exp._current_reduced or (
+            self.exp._init_reduced if any(r is not None for r in self.exp._init_reduced) else None
+        )
+        if reduced is not None and any(r is not None for r in reduced):
+            plotdata = {'data': [], 'new_data': []}
+            for i, r in enumerate(reduced):
+                if r is not None and r.spec is not None:
+                    refl = r.spec
+                    plotdata['data'].append({
+                        'model': i,
+                        'x': list(np.asarray(refl.Qz).ravel()),
+                        'v': list(np.asarray(refl.v).ravel()),
+                        'dv': list(np.asarray(refl.dv).ravel()),
+                    })
+            return json.dumps(plotdata)
+
+        # DataPoint path (simulation mode): reduce from raw points.
         steps = self.exp.steps
         if mark_new_step and steps:
             old_steps, new_steps = steps[:-1], steps[-1:]

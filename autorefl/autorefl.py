@@ -463,9 +463,9 @@ class AutoReflBase(object):
         modeldata = self.get_data()
 
         for m, measQ, (specdata, bkgpdata, bkgmdata) in zip(self.models, self.measQ, modeldata):
-            # run reduction
-            # TODO: instrument-specific reduction
-            spec = reduce(specdata, bkgpdata, bkgmdata)
+            # Reductus path: specdata is already final R(Q); bkgp/bkgm are None.
+            # DataPoint path: specdata is raw counts; local reduce() subtracts background.
+            spec = specdata if (bkgpdata is None and bkgmdata is None) else reduce(specdata, bkgpdata, bkgmdata)
 
             if spec is not None:
 
