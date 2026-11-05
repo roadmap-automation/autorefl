@@ -206,6 +206,15 @@ def reduce_autorefl_step(
     # reductus_reduce returns a ReflData (or list of ReflData for polarized templates).
     # update_models() expects a single ReflData per model — take the first if it's a list.
     spec = reductus_reduce(template, config['local_config'])
-    if isinstance(spec, (list, tuple)):
+    # process_template returns a Bundle for multi-detector instruments (e.g. CANDOR).
+    # Bundle.values is a list of ReflData objects, one per detector bank; join them
+    # into a single ReflData so downstream code can access .v / .dv.
+    if hasattr(spec, 'values'):
+        datasets = [d for d in spec.values if d is not None]
+        if datasets:
+            spec = join_datasets(datasets, 0, 0) if len(datasets) > 1 else datasets[0]
+        else:
+            spec = None
+    elif isinstance(spec, (list, tuple)):
         spec = spec[0] if spec else None
     return ReducedStepData(model=model, spec=spec)
