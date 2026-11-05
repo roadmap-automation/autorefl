@@ -180,7 +180,7 @@ class NICECampaignTask(Task):
 
     Typical wiring::
 
-        task = NICECampaignTask(motors, filename)
+        task = NICECampaignTask(motors, filename, writer_tracker=tracker)
         backend = NICEBackend(task)
         launcher = AutoReflLauncher(exp, client, signals, maxtime, pathname,
                                     backend=backend)
@@ -190,12 +190,16 @@ class NICECampaignTask(Task):
         )
     """
 
-    def __init__(self, motors_to_move: List[str], filename: str, name: str = 'AutoReflCampaign') -> None:
+    def __init__(self, motors_to_move: List[str], filename: str,
+                 writer_tracker=None, name: str = 'AutoReflCampaign') -> None:
         Task.__init__(self)
         self.name = name
         self.motors_to_move = motors_to_move
         self.filename = filename
         self.last_x = None
+        self._writer_tracker = writer_tracker
+        self._campaign_filepath: str | None = None
+        self._snapshot_path: str | None = None
 
         # Thread-safe channels between asyncio loop and NICE thread
         self._points_in: Queue = Queue()   # asyncio → NICE thread
@@ -218,6 +222,25 @@ class NICECampaignTask(Task):
         if self._active_count is not None:
             self.api.terminateCount()
 
+    def _capture_snapshot(self) -> None:
+        """Copy the writer-open campaign file to a stable snapshot for reductus.
+
+        HDF5 on Windows holds the file open (no SWMR), so we copy during the
+        inter-step idle window (after all counts, before the next step starts).
+        The copy opens the source read-only; HDF5's FILE_SHARE_READ|WRITE flags
+        permit this even while the writer has the file open.
+        """
+        if self._campaign_filepath is None:
+            return
+        import shutil
+        shadow = self._campaign_filepath + '.snapshot.nxs'
+        try:
+            shutil.copy2(self._campaign_filepath, shadow)
+            self._snapshot_path = shadow
+        except OSError:
+            # Fallback: attempt to read the writer-open file directly (Linux / SWMR).
+            self._snapshot_path = self._campaign_filepath
+
     def run(self) -> None:
         self.api.measurement_start(control_nodes=self.motors_to_move, title='autorefl')
         try:
@@ -235,6 +258,7 @@ class NICECampaignTask(Task):
                         self._move_count(pt, data)
                     if cancelled:
                         break
+                self._capture_snapshot()
                 self._data_out.put(data)
         finally:
             self.api.measurement_end()
@@ -257,16 +281,24 @@ class NICECampaignTask(Task):
         self._count(pt, data)
 
     def _count(self, pt: 'MeasurementPoint', data: Dict[int, List['DataPoint']]) -> None:
+        entry = _NICE_ENTRY.get(pt.base.intent, pt.base.intent)
         self._active_count = True
         try:
+            # Set _scanType variable for downstream bookkeeping
+            self.api._connection.setVariable('_scanType', entry)
             self.api.measurement_count(
                 filePrefix=self.filename,
-                entry=_NICE_ENTRY.get(pt.base.intent, pt.base.intent),
+                entry=entry,
                 presetTime=pt.base.t,
                 wait=True,
             )
         finally:
             self._active_count = None
+
+        # Capture the campaign filepath from WriterTracker on first count.
+        if self._campaign_filepath is None and self._writer_tracker is not None:
+            if self._writer_tracker.open_files:
+                self._campaign_filepath = self._writer_tracker.open_files[0]
 
         detector = self.api.read('counter.countAgainstDetector')
         counts = [int(c) for c in self.api.read(f'{detector}.counts')]
@@ -310,6 +342,14 @@ class NICEBackend:
     def last_x(self) -> float | None:
         """Most recently measured x position reported by the NICE task."""
         return self.nice_task.last_x
+
+    @property
+    def campaign_file_info(self) -> dict | None:
+        """FileInfo dict for the current campaign NeXus snapshot, or None if not yet available."""
+        path = self.nice_task._snapshot_path
+        if path is None:
+            return None
+        return {'path': path, 'source': 'local', 'entries': None}
 
     async def measure(
         self,

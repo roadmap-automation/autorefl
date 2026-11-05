@@ -181,3 +181,19 @@ class MeasurementPoint(object):
     bank: int
     base: DataPoint
     movements: List[str]
+
+
+@dataclass
+class ReducedStepData:
+    """Holds reductus-reduced reflectivity data for one model after a measurement step.
+
+    ``spec`` is already background-subtracted and monitor-normalised (i.e. the full
+    reductus pipeline has run).  ``bkgp`` / ``bkgm`` are stored only for future use
+    (e.g. FOM background interpolation); they are NOT fed back through the DataPoint
+    ``reduce()`` path in ``update_models()``.
+    """
+
+    model: int
+    spec: object          # reductus ReflData (background-subtracted, monitor-normalised)
+    bkgp: object = None   # Optional[ReflData]
+    bkgm: object = None   # Optional[ReflData]

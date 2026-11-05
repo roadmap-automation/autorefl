@@ -17,6 +17,7 @@ dependencies = [
     "aiohttp>=3.9.0",
     "h5py",
     "molgroups",
+    "refl-tools",
     # reflred and dataflow are from the reductus project:
     #   pip install git+https://github.com/reductus/reductus.git
     # They are not listed here to avoid breaking editable installs when

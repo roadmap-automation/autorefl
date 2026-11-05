@@ -176,3 +176,34 @@ def reduce(spec: ReflData, bkgp: Union[ReflData, None], bkgm: Union[ReflData, No
     else:
 
         return None #tuple([np.array([]) for _ in range(8)])
+
+
+def reduce_autorefl_step(
+    template: dict,
+    campaign_file: str,
+    intensity_files: list,
+    model: int = 0,
+) -> 'ReducedStepData':
+    """Reduce one AutoRefl campaign step via the reductus template pipeline.
+
+    ``campaign_file`` must be a stable snapshot (not writer-open on Windows).
+    ``intensity_files`` is a list of FileInfo dicts from IntensityDatabase.
+    ``_scanType`` must be set on each NXentry in the campaign file before this
+    is called (via NICE control variable before each ``measurement_count``).
+
+    ``generate_config_by_intent`` reads ``_scanType`` from every NXentry and
+    routes SPEC→specular, BGP→background+, BGM→background-, SLIT→intensity.
+    BGP/BGM subtraction happens inside the template if it has those slots.
+    """
+    from refl_tools.reduction import generate_config_by_intent
+    from refl_tools.reduction import reduce as reductus_reduce
+    from .datastruct import ReducedStepData
+
+    all_files = [{'path': campaign_file, 'source': 'local', 'entries': None}] + list(intensity_files)
+    config = generate_config_by_intent(all_files, template)
+    # reductus_reduce returns a ReflData (or list of ReflData for polarized templates).
+    # update_models() expects a single ReflData per model — take the first if it's a list.
+    spec = reductus_reduce(template, config['local_config'])
+    if isinstance(spec, (list, tuple)):
+        spec = spec[0] if spec else None
+    return ReducedStepData(model=model, spec=spec)

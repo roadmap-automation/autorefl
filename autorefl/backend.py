@@ -37,6 +37,15 @@ class MeasurementBackend:
         """Most recently measured x position, or None."""
         return None
 
+    @property
+    def campaign_file_info(self) -> 'dict | None':
+        """FileInfo dict for the current campaign NeXus snapshot, or None.
+
+        NICEBackend overrides this to return a snapshot path for reductus reduction.
+        SimulatedBackend and other backends return None (DataPoint path used instead).
+        """
+        return None
+
     async def measure(
         self,
         points: list[list['MeasurementPoint']],

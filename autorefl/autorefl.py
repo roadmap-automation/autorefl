@@ -15,7 +15,7 @@ from scipy.interpolate import interp1d
 
 # local imports
 from .entropy import calc_entropy, calc_init_entropy, default_entropy_options
-from .datastruct import DataPoint, ExperimentStep, Intent, MeasurementPoint
+from .datastruct import DataPoint, ExperimentStep, Intent, MeasurementPoint, ReducedStepData
 from .reduction import DataPoint2ReflData, interpolate_background, reduce, ReflData
 from .inference import default_fit_options
 from .simulation import sim_data_N, calc_expected_R, _FWHM, _iter_subprobes
@@ -209,6 +209,10 @@ class AutoReflBase(object):
         self.fit_options = {**default_fit_options, **fit_options}
         self.steps: List[ExperimentStep] = []
         self.restart_pop: Union[np.ndarray, None] = None
+        # Reductus-reduced data for the fitter (hardware mode only).
+        # None until the first real measurement completes; forces DataPoint fallback in simulation.
+        self._current_reduced: Optional[List[Optional[ReducedStepData]]] = None
+        self._init_reduced: List[Optional[ReducedStepData]] = [None] * self.nmodels
 
         # calculate initial MVN entropy in the problem
         self.entropy_options = {**default_entropy_options, **entropy_options}
@@ -371,10 +375,32 @@ class AutoReflBase(object):
 
     def get_data(self) -> List[Tuple[ReflData, Union[ReflData, None],
                                      Union[ReflData, None]]]:
-        """
-        Gets all data and returns specular, background+, background- as ReflData objects
-        """
+        """Return (spec, bkgp, bkgm) ReflData triples, one per model.
 
+        Routes to reductus-reduced data when available (hardware mode), otherwise
+        falls back to the DataPoint-based path (simulation mode).
+        """
+        if self._current_reduced is not None or any(r is not None for r in self._init_reduced):
+            return self._get_data_from_reduced()
+        return self._get_data_from_datapoints()
+
+    def _get_data_from_reduced(self) -> List[Tuple[ReflData, Union[ReflData, None],
+                                                   Union[ReflData, None]]]:
+        modeldata = []
+        for i in range(self.nmodels):
+            r = self._init_reduced[i]
+            if r is None and self._current_reduced is not None:
+                r = self._current_reduced[i]
+            if r is None:
+                modeldata.append((None, None, None))
+            else:
+                # spec is already background-subtracted; pass None for bkgp/bkgm
+                # to prevent double-subtraction in update_models().
+                modeldata.append((r.spec, None, None))
+        return modeldata
+
+    def _get_data_from_datapoints(self) -> List[Tuple[ReflData, Union[ReflData, None],
+                                                      Union[ReflData, None]]]:
         modeldata = list()
         for i, mQ in enumerate(self.measQ):
             specdata = [pt for step in self.steps for pt in step.points if (pt.model == i) & (pt.intent == Intent.spec)]
@@ -383,7 +409,6 @@ class AutoReflBase(object):
             modeldata.append((DataPoint2ReflData(mQ, specdata),
                               DataPoint2ReflData(mQ, bkgpdata),
                               DataPoint2ReflData(mQ, bkgmdata)))
-
         return modeldata
 
     async def initial_points(self, client: "FitClient") -> List[DataPoint]:

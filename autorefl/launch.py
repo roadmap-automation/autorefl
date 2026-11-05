@@ -43,7 +43,8 @@ class AutoReflLauncher:
                  pathname: str,
                  backend: MeasurementBackend,
                  intensity_template=None,
-                 intensity_files=None) -> None:
+                 intensity_files=None,
+                 reduction_template=None) -> None:
         if backend is None:
             raise ValueError(
                 'backend is required. Pass a MeasurementBackend instance '
@@ -57,6 +58,10 @@ class AutoReflLauncher:
         self.backend = backend
         self.intensity_template = intensity_template
         self.intensity_files = intensity_files
+        # reduction_template: same reductus template JSON used for real-time reduction
+        # via reductus after each measurement step (hardware mode only). If None, the
+        # DataPoint/simulation path is used for the fitter.
+        self.reduction_template = reduction_template
         self._stop = asyncio.Event()
 
     def stop(self) -> None:
@@ -100,6 +105,36 @@ class AutoReflLauncher:
         with open(path, 'w') as f:
             json.dump({'step': step_k, 'n_points': len(records), 'points': records}, f, indent=2)
         print(f'AutoLauncher: checkpoint saved — step {step_k}, {len(records)} point(s) → {path}', flush=True)
+
+    async def _run_reductus_reduction(self, step_k: int) -> None:
+        """Run reductus reduction on the current campaign snapshot and update exp._current_reduced.
+
+        Only active when ``reduction_template`` and ``intensity_files`` are set and the
+        backend provides a campaign snapshot (NICEBackend).  No-op in simulation mode.
+        """
+        if not self.reduction_template or not self.intensity_files:
+            return
+        file_info = getattr(self.backend, 'campaign_file_info', None)
+        if file_info is None:
+            return
+        from autorefl.reduction import reduce_autorefl_step
+        try:
+            print(f'AutoLauncher: running reductus reduction for step {step_k}', flush=True)
+            reduced = await asyncio.to_thread(
+                reduce_autorefl_step,
+                self.reduction_template,
+                file_info['path'],
+                self.intensity_files,
+                self.exp.curmodel,
+            )
+            new_reduced = list(self.exp._current_reduced or self.exp._init_reduced)
+            new_reduced[self.exp.curmodel] = reduced
+            self.exp._current_reduced = new_reduced
+            print(f'AutoLauncher: reductus reduction complete for step {step_k}', flush=True)
+        except Exception:
+            import traceback
+            print('AutoLauncher: reductus reduction failed — falling back to DataPoint path:', flush=True)
+            traceback.print_exc()
 
     async def run(self) -> None:
         def _log_socket_error(task):
@@ -194,6 +229,8 @@ class AutoReflLauncher:
 
                 if self._stop.is_set():
                     break
+
+                await self._run_reductus_reduction(k)
 
                 print('AutoLauncher: fitting data', flush=True)
                 def _fit_progress(msg: dict) -> None:
