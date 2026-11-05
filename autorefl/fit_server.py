@@ -83,9 +83,9 @@ _qprof_molgroups_index = None  # first molgroups model index, or None
 _qprof_requested_labels = []   # derived labels to compute, or []
 
 
-def _qprof_init(shared_bytes, molgroups_index=None, requested_labels=None):
+def _qprof_init(problem_bytes, molgroups_index=None, requested_labels=None):
     global _qprof_problem, _qprof_molgroups_index, _qprof_requested_labels
-    _qprof_problem = dill.loads(shared_bytes[:])
+    _qprof_problem = dill.loads(problem_bytes)
     _qprof_molgroups_index = molgroups_index
     _qprof_requested_labels = requested_labels or []
 
@@ -276,9 +276,9 @@ _derived_problem = None
 _derived_model_index = None
 
 
-def _derived_init(shared_bytes, model_index: int):
+def _derived_init(problem_bytes, model_index: int):
     global _derived_problem, _derived_model_index
-    _derived_problem = dill.loads(shared_bytes[:])
+    _derived_problem = dill.loads(problem_bytes)
     _derived_model_index = model_index
 
 
@@ -287,7 +287,7 @@ def _derived_worker(pt):
 
 
 def _calc_derived_sync(problem, draw_points: np.ndarray, requested_labels: List[str],
-                       manager) -> np.ndarray:
+                       manager=None) -> np.ndarray:
     """Evaluate derived quantities at each draw point. Returns N×D array."""
     molgroups_model_indices = [
         i for i, m in enumerate(problem.models) if _is_molgroups_experiment(m)
@@ -296,9 +296,9 @@ def _calc_derived_sync(problem, draw_points: np.ndarray, requested_labels: List[
         return np.empty((len(draw_points), 0))
 
     model_index = molgroups_model_indices[0]
-    shared_bytes = manager.Array("B", dill.dumps(problem))
+    problem_bytes = dill.dumps(problem)
     with concurrent.futures.ProcessPoolExecutor(
-        initializer=_derived_init, initargs=(shared_bytes, model_index)
+        initializer=_derived_init, initargs=(problem_bytes, model_index)
     ) as executor:
         results = list(executor.map(_derived_worker, draw_points))
 
@@ -549,7 +549,7 @@ async def _drain_progress(q: stdlib_queue.Queue, resp: web.StreamResponse) -> No
 
 
 def _calc_qprofiles_sync(problem, draw_points: np.ndarray, calc_tdtldl,
-                         resolution: str, manager,
+                         resolution: str, manager=None,
                          requested_derived_labels: List[str] = []) -> Tuple[list, np.ndarray]:
     """Q-profile (and optionally derived quantity) calculation via ProcessPoolExecutor.
 
@@ -564,10 +564,10 @@ def _calc_qprofiles_sync(problem, draw_points: np.ndarray, calc_tdtldl,
         (i for i, m in enumerate(problem.models) if _is_molgroups_experiment(m)), None
     ) if requested_derived_labels else None
 
-    shared_bytes = manager.Array("B", dill.dumps(problem))
+    problem_bytes = dill.dumps(problem)
     with concurrent.futures.ProcessPoolExecutor(
         initializer=_qprof_init,
-        initargs=(shared_bytes, molgroups_index, requested_derived_labels),
+        initargs=(problem_bytes, molgroups_index, requested_derived_labels),
     ) as executor:
         results = list(executor.map(_qprof_worker, draw_points))
 
