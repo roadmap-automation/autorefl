@@ -195,11 +195,13 @@ def reduce_autorefl_step(
     routes SPEC→specular, BGP→background+, BGM→background-, SLIT→intensity.
     BGP/BGM subtraction happens inside the template if it has those slots.
     """
+    import os
     from refl_tools.reduction import generate_config_by_intent
     from refl_tools.reduction import reduce as reductus_reduce
     from .datastruct import ReducedStepData
 
-    all_files = [{'path': campaign_file, 'source': 'local', 'entries': None}] + list(intensity_files)
+    all_files = [{'path': campaign_file, 'source': 'local',
+                  'mtime': int(os.path.getmtime(campaign_file)), 'entries': None}] + list(intensity_files)
     config = generate_config_by_intent(all_files, template)
     # reductus_reduce returns a ReflData (or list of ReflData for polarized templates).
     # update_models() expects a single ReflData per model — take the first if it's a list.
