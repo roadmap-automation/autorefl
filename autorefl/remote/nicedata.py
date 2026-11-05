@@ -242,7 +242,7 @@ class NICECampaignTask(Task):
             self._snapshot_path = self._campaign_filepath
 
     def run(self) -> None:
-        self.api.measurement_start(control_nodes=self.motors_to_move, title='autorefl')
+        self.api.measurement_start(control_nodes=self.motors_to_move, title='autorefl', customVars=['_scanType'])
         try:
             while not self._stop_event.is_set():
                 points = self._points_in.get()
