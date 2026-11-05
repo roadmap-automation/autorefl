@@ -227,19 +227,23 @@ class NICECampaignTask(Task):
 
         HDF5 on Windows holds the file open (no SWMR), so we copy during the
         inter-step idle window (after all counts, before the next step starts).
-        The copy opens the source read-only; HDF5's FILE_SHARE_READ|WRITE flags
-        permit this even while the writer has the file open.
+        Raw byte I/O is used instead of shutil.copy2 to avoid metadata-copy
+        failures on Windows and to bypass HDF5's internal flock mechanism.
+        If the copy fails (e.g. writer opened without FILE_SHARE_READ), reduction
+        is cleanly skipped for this step — DataPoint path takes over.
         """
         if self._campaign_filepath is None:
             return
-        import shutil
         shadow = self._campaign_filepath + '.snapshot.nxs'
         try:
-            shutil.copy2(self._campaign_filepath, shadow)
+            with open(self._campaign_filepath, 'rb') as src:
+                data = src.read()
+            with open(shadow, 'wb') as dst:
+                dst.write(data)
             self._snapshot_path = shadow
-        except OSError:
-            # Fallback: attempt to read the writer-open file directly (Linux / SWMR).
-            self._snapshot_path = self._campaign_filepath
+        except OSError as e:
+            LOG.warning('_capture_snapshot: could not copy campaign file (%s) — reductus skipped this step', e)
+            self._snapshot_path = None
 
     def run(self) -> None:
         self.api.measurement_start(control_nodes=self.motors_to_move, title='autorefl', customVars=['_scanType'])
