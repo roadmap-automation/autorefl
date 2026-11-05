@@ -1,13 +1,15 @@
 from typing import List, Dict, Callable
 
 import asyncio
+import logging
 import time
 from threading import Event, Timer
 from autorefl.remote.util import StoppableThread
 from queue import Queue, Empty
 
-# temp
 import numpy as np
+
+LOG = logging.getLogger(__name__)
 
 from autorefl.datastruct import DataPoint, MeasurementPoint, Intent, data_attributes
 
@@ -256,6 +258,13 @@ class NICECampaignTask(Task):
             small_stride = int(strides[0])
             counts = counts[int(pt.bank)::(small_stride + 1)]
         livetime = float(self.api.read('counter.liveTime'))
+
+        LOG.info(
+            'NICEBackend count: step=%d x=%.4f entry=%s livetime=%.3f s '
+            'n_detectors=%d total_counts=%d',
+            pt.step_id, pt.base.x, pt.base.intent, livetime,
+            len(counts), int(sum(counts)),
+        )
 
         datapoint = pt.base
         basedata = list(datapoint.data)
