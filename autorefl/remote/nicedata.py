@@ -238,10 +238,17 @@ class NICECampaignTask(Task):
         shadow = self._campaign_filepath + '.snapshot.nxs'
         try:
             import h5py
-            h5file = (self._writer._open_files.get(self._campaign_filepath)
-                      if self._writer is not None else None)
+            if self._writer is None:
+                LOG.warning('_capture_snapshot: no writer reference — was writer= passed to NICECampaignTask?')
+                self._snapshot_path = None
+                return
+            open_keys = list(self._writer._open_files.keys())
+            h5file = self._writer._open_files.get(self._campaign_filepath)
             if h5file is None:
-                LOG.warning('_capture_snapshot: writer handle not found for %s', self._campaign_filepath)
+                LOG.warning(
+                    '_capture_snapshot: key mismatch — campaign_filepath=%r, _open_files keys=%r',
+                    self._campaign_filepath, open_keys,
+                )
                 self._snapshot_path = None
                 return
             h5file.flush()
