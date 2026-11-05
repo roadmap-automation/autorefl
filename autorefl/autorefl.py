@@ -399,11 +399,14 @@ class AutoReflBase(object):
         init_qprof : list[np.ndarray]
         """
 
-        initpts = generate(self.problem, init='lhs', pop=max(
-                                       self.fit_options['pop'] * self.fit_options['steps'] / self.thinning,
-                                       8 / (self.eta) ** (self.npoints - 1)
-                                        ),
-                                        use_point=False)
+        initpts = await asyncio.to_thread(
+            generate, self.problem, 'lhs',
+            max(
+                self.fit_options['pop'] * self.fit_options['steps'] / self.thinning,
+                8 / (self.eta) ** (self.npoints - 1),
+            ),
+            False,
+        )
 
         calc_tdtldl = [self.instrument.Q2TdTLdL(mQ, mx, mQ) for mQ, mx in zip(self.measQ, self.x)]
 
@@ -424,7 +427,7 @@ class AutoReflBase(object):
         else:
             initstep.draw_pts = initpts
         initstep.qprofs = init_qprof
-        points = self.take_step(initstep)
+        points = await asyncio.to_thread(self.take_step, initstep)
 
         return points, init_qprof, initstep
 
@@ -487,7 +490,7 @@ class AutoReflBase(object):
                 'Call setup() first when select_pars contains string labels.'
             )
 
-        self.update_models()
+        await asyncio.to_thread(self.update_models)
 
         _steps = self.fit_options.get('steps', 0)
         fit_options = {
@@ -534,9 +537,9 @@ class AutoReflBase(object):
         self.problem.setp(fit_fields['best_x'])
         step.final_chisq = self.problem.chisq_str()
         step.final_chisq_value = float(self.problem.chisq())
-        step.H, _, _ = calc_entropy(native_draw_pts, select_pars=None, options=self.entropy_options)
+        step.H, _, _ = await asyncio.to_thread(calc_entropy, native_draw_pts, None, self.entropy_options)
         step.dH = self.init_entropy - step.H
-        step.H_marg, _, _ = calc_entropy(step.draw_pts, select_pars=self.sel, options=self.entropy_options)
+        step.H_marg, _, _ = await asyncio.to_thread(calc_entropy, step.draw_pts, self.sel, self.entropy_options)
         step.dH_marg = self.init_entropy_marg - step.H_marg
         step.qprofs = qprofs
 
