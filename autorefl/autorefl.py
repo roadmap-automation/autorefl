@@ -93,6 +93,7 @@ class AutoReflBase(object):
         self.switch_time_penalty = switch_time_penalty
         self.min_meas_time = min_meas_time
         self.measq_entropy = True
+        self.chisq_correction = False
 
         # Initialize the fit problem
         self.problem = problem
@@ -585,6 +586,17 @@ class AutoReflBase(object):
         # TODO: current analysis code can't handle multiple foms, could pass all of them in here
         step.foms, step.meastimes, step.bkgmeastimes = foms[0], meastimes[0], bkgmeastimes[0]
         step.all_foms = foms  # all npoints forecast steps; list of lists of per-model arrays
+
+        # Chi-squared correction: if the fit is bad (chisq > 1), the actual per-neutron
+        # variance is larger than Poisson by chisq — counting beyond meastime/chisq yields
+        # diminishing returns because systematic scatter dominates.  Scale down the
+        # submission-time count times proportionally, keeping min_meas_time as a floor.
+        chisq = step.final_chisq_value
+        if self.chisq_correction and chisq is not None and chisq > 1.0:
+            for pt in newpoints:
+                pt[3] = max(pt[3] / chisq, self.min_meas_time)   # new_meastime
+                if pt[4] > 0:
+                    pt[4] = max(pt[4] / chisq, self.min_meas_time)  # new_bkgmeastime
 
         points = self.request_data(newpoints, foms)
 

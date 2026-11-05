@@ -77,6 +77,11 @@ def DataPoint2ReflData(Qbasis, data: List[DataPoint], normbase='none') -> Tuple[
         # and _rebin_bank both expect absolute dL, not fractional dL/L.
         wavelength_resolution = dL
 
+        # TODO: detector.angle_x is inferred as 2*T, which is correct only while
+        # DataPoint.T always stores the planned specular angle (never the actual A3
+        # readback for background measurements, which would be theta ± dtheta_bkg).
+        # If the data-collection pipeline is ever updated to record true A3, derive
+        # detector.angle_x from the instrument x coordinate (Q or theta) instead.
         data = ReflData(monochromator=Monochromator(wavelength=L, wavelength_resolution=wavelength_resolution),
                     sample=Sample(angle_x=T),
                     angular_resolution=dT,
