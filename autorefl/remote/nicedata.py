@@ -191,13 +191,15 @@ class NICECampaignTask(Task):
     """
 
     def __init__(self, motors_to_move: List[str], filename: str,
-                 writer_tracker=None, name: str = 'AutoReflCampaign') -> None:
+                 writer_tracker=None, writer=None,
+                 name: str = 'AutoReflCampaign') -> None:
         Task.__init__(self)
         self.name = name
         self.motors_to_move = motors_to_move
         self.filename = filename
         self.last_x = None
         self._writer_tracker = writer_tracker
+        self._writer = writer          # write_nexus.Writer — for same-process h5py handle access
         self._campaign_filepath: str | None = None
         self._snapshot_path: str | None = None
 
@@ -223,26 +225,33 @@ class NICECampaignTask(Task):
             self.api.terminateCount()
 
     def _capture_snapshot(self) -> None:
-        """Copy the writer-open campaign file to a stable snapshot for reductus.
+        """Snapshot the campaign file for reductus by copying via the writer's open h5py handle.
 
-        HDF5 on Windows holds the file open (no SWMR), so we copy during the
-        inter-step idle window (after all counts, before the next step starts).
-        Raw byte I/O is used instead of shutil.copy2 to avoid metadata-copy
-        failures on Windows and to bypass HDF5's internal flock mechanism.
-        If the copy fails (e.g. writer opened without FILE_SHARE_READ), reduction
-        is cleanly skipped for this step — DataPoint path takes over.
+        On Windows the HDF5 writer opens the file with exclusive access (no
+        FILE_SHARE_READ), so any external open — including shutil.copy2 or
+        open('rb') — raises PermissionError.  Using the writer's existing
+        h5py.File object avoids a second CreateFile call entirely; we write the
+        copy to a new shadow file that reductus can open freely.
         """
         if self._campaign_filepath is None:
             return
         shadow = self._campaign_filepath + '.snapshot.nxs'
         try:
-            with open(self._campaign_filepath, 'rb') as src:
-                data = src.read()
-            with open(shadow, 'wb') as dst:
-                dst.write(data)
+            import h5py
+            h5file = (self._writer._open_files.get(self._campaign_filepath)
+                      if self._writer is not None else None)
+            if h5file is None:
+                LOG.warning('_capture_snapshot: writer handle not found for %s', self._campaign_filepath)
+                self._snapshot_path = None
+                return
+            h5file.flush()
+            with h5py.File(shadow, 'w') as dst:
+                for key in h5file:
+                    h5file.copy(key, dst)
+                dst.attrs.update(h5file.attrs)
             self._snapshot_path = shadow
-        except OSError as e:
-            LOG.warning('_capture_snapshot: could not copy campaign file (%s) — reductus skipped this step', e)
+        except Exception as e:
+            LOG.warning('_capture_snapshot: failed (%s) — reductus skipped this step', e)
             self._snapshot_path = None
 
     def run(self) -> None:
