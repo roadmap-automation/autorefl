@@ -263,8 +263,9 @@ class NICECampaignTask(Task):
         counts = [int(c) for c in self.api.read(f'{detector}.counts')]
         if pt.bank is not None:
             strides = self.api.read(f'{detector}.strides')
-            small_stride = int(strides[0])
-            counts = counts[int(pt.bank)::(small_stride + 1)]
+            row_stride = int(strides[1])  # elements per row (row-major layout)
+            start = int(pt.bank) * row_stride
+            counts = counts[start:start + row_stride]
         livetime = float(self.api.read('counter.liveTime'))
 
         LOG.info(
@@ -489,8 +490,9 @@ class NICEMeasurementDevice(MeasurementDevice, Task):
         # select subset of counts corresponding to desired detector bank (only for multiDetector)
         if pt.bank is not None:
             strides = self.api.read(f'{detectorName}.strides')
-            small_stride = int(strides[0])
-            counts = counts[int(pt.bank)::(small_stride + 1)]
+            row_stride = int(strides[1])  # elements per row (row-major layout)
+            start = int(pt.bank) * row_stride
+            counts = counts[start:start + row_stride]
             
         livetime = float(self.api.read('counter.liveTime'))
 
