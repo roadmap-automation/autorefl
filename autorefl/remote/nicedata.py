@@ -13,6 +13,13 @@ LOG = logging.getLogger(__name__)
 
 from autorefl.datastruct import DataPoint, MeasurementPoint, Intent, data_attributes
 
+# Map reductus intent strings to conventional NICE entry names.
+_NICE_ENTRY = {
+    'specular':    'SPEC',
+    'background+': 'BGP',
+    'background-': 'BGM',
+}
+
 from nice.remote import Task, NiceApi, connect
 
 def blocking(func):
@@ -252,7 +259,7 @@ class NICECampaignTask(Task):
     def _count(self, pt: 'MeasurementPoint', data: Dict[int, List['DataPoint']]) -> None:
         self._active_count = self.api.measurement_count(
             filePrefix=self.filename,
-            entry=pt.base.intent,
+            entry=_NICE_ENTRY.get(pt.base.intent, pt.base.intent),
             presetTime=pt.base.t,
             wait=False,
         )
@@ -478,7 +485,7 @@ class NICEMeasurementDevice(MeasurementDevice, Task):
 
         # set up active count process; this allows clean exiting in stop() using terminateCount()
         self.active_count = self.api.measurement_count(filePrefix=self._filename,
-                        entry=pt.base.intent,
+                        entry=_NICE_ENTRY.get(pt.base.intent, pt.base.intent),
                         presetTime=pt.base.t, wait=False)
         self.api.wait(self.active_count)
 
