@@ -183,6 +183,7 @@ def reduce_autorefl_step(
     campaign_file: str,
     intensity_files: list,
     model: int = 0,
+    q_rebin: dict | None = None,
 ) -> 'ReducedStepData':
     """Reduce one AutoRefl campaign step via the reductus template pipeline.
 
@@ -196,7 +197,7 @@ def reduce_autorefl_step(
     BGP/BGM subtraction happens inside the template if it has those slots.
     """
     import os
-    from refl_tools.reduction import generate_config_by_intent, load_nexus_trajectory_data
+    from refl_tools.reduction import generate_config_by_intent, generate_rebin_config, load_nexus_trajectory_data
     from refl_tools.reduction import reduce as reductus_reduce
     from .datastruct import ReducedStepData
 
@@ -208,6 +209,8 @@ def reduce_autorefl_step(
     all_files = [{'path': campaign_file, 'source': 'local',
                   'mtime': int(os.path.getmtime(campaign_file)), 'entries': None}] + slit_intensity_files
     config = generate_config_by_intent(all_files, template)
+    if q_rebin is not None:
+        config['local_config'].update(generate_rebin_config(template, q_rebin))
     # reductus_reduce returns a ReflData (or list of ReflData for polarized templates).
     # update_models() expects a single ReflData per model — take the first if it's a list.
     spec = reductus_reduce(template, config['local_config'])

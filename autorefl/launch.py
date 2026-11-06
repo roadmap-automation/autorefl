@@ -44,7 +44,8 @@ class AutoReflLauncher:
                  backend: MeasurementBackend,
                  intensity_template=None,
                  intensity_files=None,
-                 reduction_template=None) -> None:
+                 reduction_template=None,
+                 q_rebin=None) -> None:
         if backend is None:
             raise ValueError(
                 'backend is required. Pass a MeasurementBackend instance '
@@ -62,6 +63,7 @@ class AutoReflLauncher:
         # via reductus after each measurement step (hardware mode only). If None, the
         # DataPoint/simulation path is used for the fitter.
         self.reduction_template = reduction_template
+        self.q_rebin = q_rebin
         self._stop = asyncio.Event()
 
     def stop(self) -> None:
@@ -126,6 +128,7 @@ class AutoReflLauncher:
                 file_info['path'],
                 self.intensity_files,
                 self.exp.curmodel,
+                self.q_rebin,
             )
             new_reduced = list(self.exp._current_reduced or self.exp._init_reduced)
             new_reduced[self.exp.curmodel] = reduced
