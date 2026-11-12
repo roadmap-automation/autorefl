@@ -521,7 +521,7 @@ def _run_dream(problem, fit_options: dict, fitter: Optional[DreamFit],
             max_workers=N_WORKERS,
             initializer=_dream_env_init,
             initargs=(problem_bytes,),
-            mp_context=multiprocessing.get_context('spawn'),
+            mp_context=_POOL_MP_CONTEXT,
         ) as pool:
             fitter.solve(monitors, mapper=lambda pop: list(pool.map(_dream_nllf_worker, pop)), **opts)
     else:
