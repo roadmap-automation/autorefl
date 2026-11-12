@@ -245,8 +245,8 @@ class NICECampaignTask(Task):
         self.api.measurement_start(control_nodes=self.motors_to_move,
                                    title='autorefl',
                                    customVars=['_scanType'],
-                                   xaxis='sampleAngle',
-                                   yaxis='counter.liveROI'
+                                   xAxis='sampleAngle',
+                                   yAxis='counter.liveROI'
                                    )
         try:
             while not self._stop_event.is_set():
