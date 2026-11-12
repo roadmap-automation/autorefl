@@ -48,45 +48,33 @@ import os as _os
 N_WORKERS: int = int(_os.environ.get('SLURM_CPUS_PER_TASK', None) or _os.cpu_count() or 1)
 
 
-# ── DREAM parallel nllf worker ────────────────────────────────────────────────────────
+# ── Unified persistent worker state ──────────────────────────────────────────
+# The pool stays alive across fits.  Before each computation phase the main
+# process broadcasts problem bytes to all workers via pool.map(_worker_load, …).
+# Workers cache the loaded FitProblem; subsequent per-task IPC is tiny (params
+# array or draw point only).  No temp files, no manager, no semaphores.
 
-_dream_problem = None  # per-worker; loaded once in initializer
+_worker_problem = None  # per-worker cached FitProblem
 
 
-def _dream_env_init(problem_bytes: bytes) -> None:
-    """Pool initializer: set thread limits and deserialize the problem once per worker.
-
-    Each worker must use exactly one thread for BLAS/OpenMP so that N_WORKERS
-    processes map cleanly onto N_WORKERS SLURM cores without over-subscribing.
-    Set before dill.loads to avoid MKL re-init.
-    """
+def _worker_env_init() -> None:
     import os as _worker_os
     _worker_os.environ['MKL_NUM_THREADS'] = '1'
     _worker_os.environ['OMP_NUM_THREADS'] = '1'
     _worker_os.environ['OPENBLAS_NUM_THREADS'] = '1'
-    global _dream_problem
-    _dream_problem = dill.loads(problem_bytes)
+
+
+def _worker_load(problem_bytes: bytes) -> bool:
+    global _worker_problem
+    _worker_problem = dill.loads(problem_bytes)
+    return True
 
 
 def _dream_nllf_worker(params) -> float:
-    return _dream_problem.nllf(params)
+    return _worker_problem.nllf(params)
 
 
-# ── Q-profile + derived worker (module level so ProcessPoolExecutor can pickle it) ────
-
-_qprof_problem = None          # populated by _qprof_init in each worker process
-_qprof_molgroups_index = None  # first molgroups model index, or None
-_qprof_requested_labels = []   # derived labels to compute, or []
-
-
-def _qprof_init(problem_bytes, molgroups_index=None, requested_labels=None):
-    global _qprof_problem, _qprof_molgroups_index, _qprof_requested_labels
-    _qprof_problem = dill.loads(problem_bytes)
-    _qprof_molgroups_index = molgroups_index
-    _qprof_requested_labels = requested_labels or []
-
-
-def _qprof_worker(point):
+def _qprof_worker(args):
     """Evaluate Q-profiles and (optionally) derived quantities at one draw point.
 
     setp + chisq_str are called exactly once, so derived extraction piggybacks
@@ -94,11 +82,12 @@ def _qprof_worker(point):
 
     Returns (qprof_list, derived_dict) where derived_dict maps label→float.
     """
-    mlist = list(_qprof_problem.models)
+    point, molgroups_index, requested_labels = args
+    mlist = list(_worker_problem.models)
 
     # single setp + chisq_str updates all models
-    _qprof_problem.setp(point)
-    _qprof_problem.chisq_str()
+    _worker_problem.setp(point)
+    _worker_problem.chisq_str()
 
     # For a polarized model, calc_expected_R returns a list of R arrays (one per active
     # xs).  All xs share the same T/L, so we consume one calcTdTLdL entry per model and
@@ -106,14 +95,14 @@ def _qprof_worker(point):
     # calc_expected_R always returns a list: 1 element for unpolarized, n for polarized.
     # Polarized models consume one calcTdTLdL entry (all xs share the same T/L).
     qprof = []
-    tdtldl_iter = iter(_qprof_problem.calcTdTLdL)
+    tdtldl_iter = iter(_worker_problem.calcTdTLdL)
     for m in mlist:
         newvar = next(tdtldl_iter)
-        qprof.extend(calc_expected_R(m, *newvar, resolution=_qprof_problem.resolution))
+        qprof.extend(calc_expected_R(m, *newvar, resolution=_worker_problem.resolution))
 
     derived = {}
-    if _qprof_requested_labels and _qprof_molgroups_index is not None:
-        model = mlist[_qprof_molgroups_index]
+    if requested_labels and molgroups_index is not None:
+        model = mlist[molgroups_index]
         for layer in _collect_molgroups_layers(model):
             iresults = {'parameters': {}}
             for group in [layer.base_group] + layer.add_groups + layer.overlay_groups:
@@ -125,10 +114,15 @@ def _qprof_worker(point):
                 if isinstance(props, dict):
                     for prop_key, val in props.items():
                         key = f'{group_key}.{prop_key}'
-                        if key in _qprof_requested_labels:
+                        if key in requested_labels:
                             derived[key] = float(val)
 
     return qprof, derived
+
+
+def _derived_worker(args):
+    pt, model_index = args
+    return _eval_derived_one(_worker_problem, model_index, pt)
 
 
 # ── Molgroups derived parameter helpers ─────────────────────────────────────
@@ -266,23 +260,18 @@ def _discover_derived(problem) -> Tuple[List[str], np.ndarray, np.ndarray, np.nd
     return labels, prior_scales, native_arr, derived_arr
 
 
-# ── Derived draws worker (module level for ProcessPoolExecutor) ──────────────
+def _broadcast(pool: concurrent.futures.ProcessPoolExecutor,
+               fn, *args, n: int = N_WORKERS) -> None:
+    """Call fn(*args) on every worker in the pool before submitting real work.
 
-_derived_problem = None
-_derived_model_index = None
-
-
-def _derived_init(problem_bytes, model_index: int):
-    global _derived_problem, _derived_model_index
-    _derived_problem = dill.loads(problem_bytes)
-    _derived_model_index = model_index
+    Submits exactly n identical tasks so that each idle worker executes fn once,
+    ensuring all workers share the same cached state before the next map call.
+    """
+    list(pool.map(fn, [args[0]] * n if len(args) == 1 else [args] * n, chunksize=1))
 
 
-def _derived_worker(pt):
-    return _eval_derived_one(_derived_problem, _derived_model_index, pt)
-
-
-def _calc_derived_sync(problem, draw_points: np.ndarray, requested_labels: List[str]) -> np.ndarray:
+def _calc_derived_sync(problem, draw_points: np.ndarray, requested_labels: List[str],
+                       pool: Optional[concurrent.futures.ProcessPoolExecutor] = None) -> np.ndarray:
     """Evaluate derived quantities at each draw point. Returns N×D array."""
     molgroups_model_indices = [
         i for i, m in enumerate(problem.models) if _is_molgroups_experiment(m)
@@ -291,12 +280,14 @@ def _calc_derived_sync(problem, draw_points: np.ndarray, requested_labels: List[
         return np.empty((len(draw_points), 0))
 
     model_index = molgroups_model_indices[0]
-    problem_bytes = dill.dumps(problem)
-    with concurrent.futures.ProcessPoolExecutor(
-        initializer=_derived_init, initargs=(problem_bytes, model_index),
-        mp_context=_POOL_MP_CONTEXT,
-    ) as executor:
-        results = list(executor.map(_derived_worker, draw_points))
+
+    if pool is not None:
+        tasks = [(pt, model_index) for pt in draw_points]
+        results = list(pool.map(_derived_worker, tasks))
+    else:
+        problem_bytes = dill.dumps(problem)
+        _worker_load(problem_bytes)
+        results = [_derived_worker((pt, model_index)) for pt in draw_points]
 
     return np.array([[r.get(lbl, np.nan) for lbl in requested_labels] for r in results])
 
@@ -306,6 +297,7 @@ class ServerState:
     job_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     is_busy: bool = False
     fitter: Optional[DreamFit] = None  # retained between calls for warm-start
+    dream_pool: Optional[concurrent.futures.ProcessPoolExecutor] = None
     # populated by /setup, cleared by /reset
     derived_labels: List[str] = field(default_factory=list)
     derived_prior_scales: np.ndarray = field(default_factory=lambda: np.array([]))
@@ -431,7 +423,7 @@ async def post_derived_draws(request: web.Request) -> web.Response:
         requested_labels = json.loads(fields.get('requested_labels', '[]'))
 
         derived_arr = await asyncio.to_thread(
-            _calc_derived_sync, problem, draw_points, requested_labels
+            _calc_derived_sync, problem, draw_points, requested_labels, state.dream_pool
         )
 
         buf = io.BytesIO()
@@ -453,7 +445,8 @@ async def post_derived_draws(request: web.Request) -> web.Response:
 
 def _run_dream(problem, fit_options: dict, fitter: Optional[DreamFit],
                progress_q: Optional[stdlib_queue.Queue] = None,
-               abort_event: Optional[threading.Event] = None) -> DreamFit:
+               abort_event: Optional[threading.Event] = None,
+               pool: Optional[concurrent.futures.ProcessPoolExecutor] = None) -> DreamFit:
     """Synchronous DreamFit run. Intended to be called in a thread.
 
     Pass an existing fitter for warm-start (its state is resumed); pass None
@@ -515,15 +508,10 @@ def _run_dream(problem, fit_options: dict, fitter: Optional[DreamFit],
         'trim':     fit_options.get('trim', True),
         'steps':    fit_options.get('steps', 0),
     }
-    if N_WORKERS > 1:
+    if pool is not None:
         problem_bytes = dill.dumps(problem)
-        with concurrent.futures.ProcessPoolExecutor(
-            max_workers=N_WORKERS,
-            initializer=_dream_env_init,
-            initargs=(problem_bytes,),
-            mp_context=_POOL_MP_CONTEXT,
-        ) as pool:
-            fitter.solve(monitors, mapper=lambda pop: list(pool.map(_dream_nllf_worker, pop)), **opts)
+        _broadcast(pool, _worker_load, problem_bytes)
+        fitter.solve(monitors, mapper=lambda pop: list(pool.map(_dream_nllf_worker, pop)), **opts)
     else:
         fitter.solve(monitors, mapper=lambda p: list(map(problem.nllf, p)), **opts)
 
@@ -546,8 +534,10 @@ async def _drain_progress(q: stdlib_queue.Queue, resp: web.StreamResponse) -> No
 
 def _calc_qprofiles_sync(problem, draw_points: np.ndarray, calc_tdtldl,
                          resolution: str,
-                         requested_derived_labels: List[str] = []) -> Tuple[list, np.ndarray]:
-    """Q-profile (and optionally derived quantity) calculation via ProcessPoolExecutor.
+                         requested_derived_labels: List[str] = [],
+                         pool: Optional[concurrent.futures.ProcessPoolExecutor] = None,
+                         ) -> Tuple[list, np.ndarray]:
+    """Q-profile (and optionally derived quantity) calculation.
 
     Returns (qprofs, derived_arr) where:
         qprofs      — list of (ndraw, nQ) arrays, one per model
@@ -561,12 +551,15 @@ def _calc_qprofiles_sync(problem, draw_points: np.ndarray, calc_tdtldl,
     ) if requested_derived_labels else None
 
     problem_bytes = dill.dumps(problem)
-    with concurrent.futures.ProcessPoolExecutor(
-        initializer=_qprof_init,
-        initargs=(problem_bytes, molgroups_index, requested_derived_labels),
-        mp_context=_POOL_MP_CONTEXT,
-    ) as executor:
-        results = list(executor.map(_qprof_worker, draw_points))
+
+    if pool is not None:
+        _broadcast(pool, _worker_load, problem_bytes)
+        tasks = [(pt, molgroups_index, requested_derived_labels) for pt in draw_points]
+        results = list(pool.map(_qprof_worker, tasks))
+    else:
+        _worker_load(problem_bytes)
+        results = [_qprof_worker((pt, molgroups_index, requested_derived_labels))
+                   for pt in draw_points]
 
     # For polarized models calc_expected_R extends qprof with one array per xs,
     # so len(r[0]) may exceed len(calc_tdtldl).  Use the actual result length.
@@ -688,7 +681,7 @@ async def post_fit(request: web.Request) -> web.Response:
                 try:
                     return await asyncio.to_thread(
                         _run_dream, problem, fit_options, fitter_in,
-                        progress_q, abort_event,
+                        progress_q, abort_event, state.dream_pool,
                     )
                 finally:
                     progress_q.put(_QUEUE_DONE)  # unblock drain even on cancellation
@@ -715,7 +708,7 @@ async def post_fit(request: web.Request) -> web.Response:
 
             qprofs, derived_arr = await asyncio.to_thread(
                 _calc_qprofiles_sync, problem, dream_state.draw().points,
-                calc_tdtldl, resolution, requested_derived_labels,
+                calc_tdtldl, resolution, requested_derived_labels, state.dream_pool,
             )
 
             hdf5_bytes = await asyncio.to_thread(
@@ -777,9 +770,10 @@ async def post_qprofiles(request: web.Request) -> web.Response:
 
         requested_derived_labels = json.loads(fields.get('requested_derived_labels', '[]'))
 
+        state: ServerState = request.app['state']
         qprofs, derived_arr = await asyncio.to_thread(
             _calc_qprofiles_sync, problem, draw_points, calc_tdtldl, resolution,
-            requested_derived_labels,
+            requested_derived_labels, state.dream_pool,
         )
 
         buf = io.BytesIO()
@@ -803,13 +797,29 @@ async def post_qprofiles(request: web.Request) -> web.Response:
         return web.json_response({'error': str(e)}, status=500)
 
 
+async def _on_startup(app: web.Application) -> None:
+    state: ServerState = app['state']
+    if N_WORKERS > 1:
+        state.dream_pool = concurrent.futures.ProcessPoolExecutor(
+            max_workers=N_WORKERS,
+            initializer=_worker_env_init,
+            mp_context=_POOL_MP_CONTEXT,
+        )
+        logger.info('Worker pool started (%d workers)', N_WORKERS)
+
+
 async def _on_cleanup(app: web.Application) -> None:
     _shutdown.set()  # stop any DREAM thread still running after server shutdown
+    state: ServerState = app['state']
+    if state.dream_pool is not None:
+        state.dream_pool.shutdown(wait=False)
+        logger.info('Worker pool shut down')
 
 
 def build_app() -> web.Application:
     app = web.Application(client_max_size=512 * 1024 * 1024)  # 512 MB upload limit
     app['state'] = ServerState()
+    app.on_startup.append(_on_startup)
     app.on_cleanup.append(_on_cleanup)
     app.add_routes(routes)
     return app
