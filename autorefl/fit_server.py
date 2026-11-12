@@ -22,6 +22,11 @@ import multiprocessing
 import multiprocessing.managers
 import threading
 
+# forkserver (Python 3.14+ Linux default) can't rebuild Manager Namespace semaphores
+# in pool workers because the semaphore was created after the forkserver started.
+# spawn creates fresh interpreter processes that can find named semaphores by name.
+_MP_CONTEXT = multiprocessing.get_context('spawn')
+
 _shutdown = threading.Event()
 _QUEUE_DONE = object()
 
@@ -298,7 +303,8 @@ def _calc_derived_sync(problem, draw_points: np.ndarray, requested_labels: List[
     model_index = molgroups_model_indices[0]
     problem_bytes = dill.dumps(problem)
     with concurrent.futures.ProcessPoolExecutor(
-        initializer=_derived_init, initargs=(problem_bytes, model_index)
+        initializer=_derived_init, initargs=(problem_bytes, model_index),
+        mp_context=_MP_CONTEXT,
     ) as executor:
         results = list(executor.map(_derived_worker, draw_points))
 
@@ -568,6 +574,7 @@ def _calc_qprofiles_sync(problem, draw_points: np.ndarray, calc_tdtldl,
     with concurrent.futures.ProcessPoolExecutor(
         initializer=_qprof_init,
         initargs=(problem_bytes, molgroups_index, requested_derived_labels),
+        mp_context=_MP_CONTEXT,
     ) as executor:
         results = list(executor.map(_qprof_worker, draw_points))
 
@@ -810,7 +817,7 @@ async def post_qprofiles(request: web.Request) -> web.Response:
 
 async def _on_startup(app: web.Application) -> None:
     state: ServerState = app['state']
-    state.mp_manager = multiprocessing.Manager()
+    state.mp_manager = _MP_CONTEXT.Manager()
     logger.info('Multiprocessing manager started')
     state.dream_shared = state.mp_manager.Namespace()
     state.dream_shared.generation = 0
@@ -820,6 +827,7 @@ async def _on_startup(app: web.Application) -> None:
             max_workers=N_WORKERS,
             initializer=_dream_env_init,
             initargs=(state.dream_shared,),
+            mp_context=_MP_CONTEXT,
         )
         logger.info('DREAM process pool started (%d workers)', N_WORKERS)
 
