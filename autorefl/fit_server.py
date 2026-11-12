@@ -82,7 +82,7 @@ def _qprof_worker(args):
 
     Returns (qprof_list, derived_dict) where derived_dict maps label→float.
     """
-    point, molgroups_index, requested_labels = args
+    point, molgroups_index, requested_labels, calc_tdtldl, resolution = args
     mlist = list(_worker_problem.models)
 
     # single setp + chisq_str updates all models
@@ -95,10 +95,10 @@ def _qprof_worker(args):
     # calc_expected_R always returns a list: 1 element for unpolarized, n for polarized.
     # Polarized models consume one calcTdTLdL entry (all xs share the same T/L).
     qprof = []
-    tdtldl_iter = iter(_worker_problem.calcTdTLdL)
+    tdtldl_iter = iter(calc_tdtldl)
     for m in mlist:
         newvar = next(tdtldl_iter)
-        qprof.extend(calc_expected_R(m, *newvar, resolution=_worker_problem.resolution))
+        qprof.extend(calc_expected_R(m, *newvar, resolution=resolution))
 
     derived = {}
     if requested_labels and molgroups_index is not None:
@@ -543,9 +543,6 @@ def _calc_qprofiles_sync(problem, draw_points: np.ndarray, calc_tdtldl,
         qprofs      — list of (ndraw, nQ) arrays, one per model
         derived_arr — (ndraw, D) array; empty if requested_derived_labels is []
     """
-    setattr(problem, 'calcTdTLdL', calc_tdtldl)
-    setattr(problem, 'resolution', resolution)
-
     molgroups_index = next(
         (i for i, m in enumerate(problem.models) if _is_molgroups_experiment(m)), None
     ) if requested_derived_labels else None
@@ -554,11 +551,12 @@ def _calc_qprofiles_sync(problem, draw_points: np.ndarray, calc_tdtldl,
 
     if pool is not None:
         _broadcast(pool, _worker_load, problem_bytes)
-        tasks = [(pt, molgroups_index, requested_derived_labels) for pt in draw_points]
+        tasks = [(pt, molgroups_index, requested_derived_labels, calc_tdtldl, resolution)
+                 for pt in draw_points]
         results = list(pool.map(_qprof_worker, tasks))
     else:
         _worker_load(problem_bytes)
-        results = [_qprof_worker((pt, molgroups_index, requested_derived_labels))
+        results = [_qprof_worker((pt, molgroups_index, requested_derived_labels, calc_tdtldl, resolution))
                    for pt in draw_points]
 
     # For polarized models calc_expected_R extends qprof with one array per xs,
