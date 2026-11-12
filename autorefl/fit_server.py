@@ -29,7 +29,6 @@ _POOL_MP_CONTEXT = multiprocessing.get_context('forkserver')
 _shutdown = threading.Event()
 _QUEUE_DONE = object()
 
-import dill
 import h5py
 import numpy as np
 from aiohttp import web
@@ -37,7 +36,7 @@ from scipy.stats import chi2 as _chi2
 
 from bumps.fitters import DreamFit, MonitorRunner
 from bumps.initpop import generate
-from bumps.serialize import deserialize as bumps_deserialize
+from bumps.serialize import deserialize as bumps_deserialize, serialize as bumps_serialize
 from .simulation import calc_expected_R, _iter_subprobes
 
 logger = logging.getLogger(__name__)
@@ -50,9 +49,10 @@ N_WORKERS: int = int(_os.environ.get('SLURM_CPUS_PER_TASK', None) or _os.cpu_cou
 
 # ── Unified persistent worker state ──────────────────────────────────────────
 # The pool stays alive across fits.  Before each computation phase the main
-# process broadcasts problem bytes to all workers via pool.map(_worker_load, …).
+# process broadcasts the problem to all workers via pool.map(_worker_load_bumps, …).
 # Workers cache the loaded FitProblem; subsequent per-task IPC is tiny (params
-# array or draw point only).  No temp files, no manager, no semaphores.
+# array or draw point only).  bumps_serialize is used instead of dill because
+# dill.dumps does not reliably preserve measurement data across warm-start fits.
 
 _worker_problem = None  # per-worker cached FitProblem
 
@@ -64,9 +64,19 @@ def _worker_env_init() -> None:
     _worker_os.environ['OPENBLAS_NUM_THREADS'] = '1'
 
 
-def _worker_load(problem_bytes: bytes) -> bool:
+def _worker_load_bumps(problem_json_bytes: bytes) -> bool:
+    """Load FitProblem from bumps JSON bytes and re-apply oversampling.
+
+    Uses bumps_deserialize instead of dill because dill.dumps does not reliably
+    preserve measurement data across warm-start fits.  Returns True on success
+    so callers can verify all workers loaded correctly.
+    """
     global _worker_problem
-    _worker_problem = dill.loads(problem_bytes)
+    _worker_problem = bumps_deserialize(json.loads(problem_json_bytes.decode()))
+    for m in _worker_problem.models:
+        for sub in _iter_subprobes(m.probe):
+            sub._apply_oversamplings()
+        m.update()
     return True
 
 
@@ -266,8 +276,10 @@ def _broadcast(pool: concurrent.futures.ProcessPoolExecutor,
 
     Submits exactly n identical tasks so that each idle worker executes fn once,
     ensuring all workers share the same cached state before the next map call.
+    Logs the return values so callers can verify all workers loaded correctly.
     """
-    list(pool.map(fn, [args[0]] * n if len(args) == 1 else [args] * n, chunksize=1))
+    results = list(pool.map(fn, [args[0]] * n if len(args) == 1 else [args] * n, chunksize=1))
+    logger.debug('_broadcast %s results: %s', fn.__name__, results)
 
 
 def _calc_derived_sync(problem, draw_points: np.ndarray, requested_labels: List[str],
@@ -281,12 +293,14 @@ def _calc_derived_sync(problem, draw_points: np.ndarray, requested_labels: List[
 
     model_index = molgroups_model_indices[0]
 
+    problem_json_bytes = json.dumps(bumps_serialize(problem)).encode()
+
     if pool is not None:
+        _broadcast(pool, _worker_load_bumps, problem_json_bytes)
         tasks = [(pt, model_index) for pt in draw_points]
         results = list(pool.map(_derived_worker, tasks))
     else:
-        problem_bytes = dill.dumps(problem)
-        _worker_load(problem_bytes)
+        _worker_load_bumps(problem_json_bytes)
         results = [_derived_worker((pt, model_index)) for pt in draw_points]
 
     return np.array([[r.get(lbl, np.nan) for lbl in requested_labels] for r in results])
@@ -509,8 +523,8 @@ def _run_dream(problem, fit_options: dict, fitter: Optional[DreamFit],
         'steps':    fit_options.get('steps', 0),
     }
     if pool is not None:
-        problem_bytes = dill.dumps(problem)
-        _broadcast(pool, _worker_load, problem_bytes)
+        problem_json_bytes = json.dumps(bumps_serialize(problem)).encode()
+        _broadcast(pool, _worker_load_bumps, problem_json_bytes)
         fitter.solve(monitors, mapper=lambda pop: list(pool.map(_dream_nllf_worker, pop)), **opts)
     else:
         fitter.solve(monitors, mapper=lambda p: list(map(problem.nllf, p)), **opts)
@@ -547,15 +561,15 @@ def _calc_qprofiles_sync(problem, draw_points: np.ndarray, calc_tdtldl,
         (i for i, m in enumerate(problem.models) if _is_molgroups_experiment(m)), None
     ) if requested_derived_labels else None
 
-    problem_bytes = dill.dumps(problem)
+    problem_json_bytes = json.dumps(bumps_serialize(problem)).encode()
 
     if pool is not None:
-        _broadcast(pool, _worker_load, problem_bytes)
+        _broadcast(pool, _worker_load_bumps, problem_json_bytes)
         tasks = [(pt, molgroups_index, requested_derived_labels, calc_tdtldl, resolution)
                  for pt in draw_points]
         results = list(pool.map(_qprof_worker, tasks))
     else:
-        _worker_load(problem_bytes)
+        _worker_load_bumps(problem_json_bytes)
         results = [_qprof_worker((pt, molgroups_index, requested_derived_labels, calc_tdtldl, resolution))
                    for pt in draw_points]
 
