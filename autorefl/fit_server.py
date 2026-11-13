@@ -47,29 +47,39 @@ import os as _os
 N_WORKERS: int = int(_os.environ.get('SLURM_CPUS_PER_TASK', None) or _os.cpu_count() or 1)
 
 
-# ── Unified persistent worker state ──────────────────────────────────────────
-# The pool stays alive across fits.  Before each computation phase the main
-# process broadcasts the problem to all workers via pool.map(_worker_load_bumps, …).
-# Workers cache the loaded FitProblem; subsequent per-task IPC is tiny (params
-# array or draw point only).  bumps_serialize is used instead of dill because
-# dill.dumps does not reliably preserve measurement data across warm-start fits.
+# ── Worker pool state ────────────────────────────────────────────────────────
+# A fresh ProcessPoolExecutor is created per fit/qprofiles request using the
+# pool's *initializer* to load the FitProblem into every worker at spawn time.
+# This avoids the broadcast race condition: with lazy worker creation, an N-task
+# broadcast could be consumed by fewer than N workers, leaving later-spawned
+# workers with _worker_problem = None when DREAM started sending tasks to them.
 
-_worker_problem = None  # per-worker cached FitProblem
-
-
-def _worker_env_init() -> None:
-    import os as _worker_os
-    _worker_os.environ['MKL_NUM_THREADS'] = '1'
-    _worker_os.environ['OMP_NUM_THREADS'] = '1'
-    _worker_os.environ['OPENBLAS_NUM_THREADS'] = '1'
+_worker_problem = None  # per-worker cached FitProblem (set by initializer)
 
 
-def _worker_load_bumps(problem_json_bytes: bytes) -> bool:
-    """Load FitProblem from bumps JSON bytes and re-apply oversampling.
+def _worker_init_with_problem(problem_json_bytes: bytes) -> None:
+    """Worker initializer: set thread counts and load FitProblem from bumps JSON.
 
-    Uses bumps_deserialize instead of dill because dill.dumps does not reliably
-    preserve measurement data across warm-start fits.  Returns True on success
-    so callers can verify all workers loaded correctly.
+    Runs once per worker at spawn time so every worker DREAM or qprofiles ever
+    uses has the correct problem before its first task arrives.
+    """
+    import os as _os
+    _os.environ['MKL_NUM_THREADS'] = '1'
+    _os.environ['OMP_NUM_THREADS'] = '1'
+    _os.environ['OPENBLAS_NUM_THREADS'] = '1'
+    global _worker_problem
+    _worker_problem = bumps_deserialize(json.loads(problem_json_bytes.decode()))
+    for m in _worker_problem.models:
+        for sub in _iter_subprobes(m.probe):
+            sub._apply_oversamplings()
+        m.update()
+
+
+def _worker_load_bumps(problem_json_bytes: bytes) -> None:
+    """Load problem into the main-process _worker_problem global.
+
+    Only used by pool=None (single-CPU) code paths so that _qprof_worker and
+    _derived_worker can use _worker_problem without branching.
     """
     global _worker_problem
     _worker_problem = bumps_deserialize(json.loads(problem_json_bytes.decode()))
@@ -77,7 +87,20 @@ def _worker_load_bumps(problem_json_bytes: bytes) -> bool:
         for sub in _iter_subprobes(m.probe):
             sub._apply_oversamplings()
         m.update()
-    return True
+
+
+def _make_pool_for_problem(
+        problem_json_bytes: bytes,
+) -> Optional[concurrent.futures.ProcessPoolExecutor]:
+    """Return a fresh pool whose workers have the problem pre-loaded, or None."""
+    if N_WORKERS <= 1:
+        return None
+    return concurrent.futures.ProcessPoolExecutor(
+        max_workers=N_WORKERS,
+        initializer=_worker_init_with_problem,
+        initargs=(problem_json_bytes,),
+        mp_context=_POOL_MP_CONTEXT,
+    )
 
 
 def _dream_nllf_worker(params) -> float:
@@ -270,17 +293,6 @@ def _discover_derived(problem) -> Tuple[List[str], np.ndarray, np.ndarray, np.nd
     return labels, prior_scales, native_arr, derived_arr
 
 
-def _broadcast(pool: concurrent.futures.ProcessPoolExecutor,
-               fn, *args, n: int = N_WORKERS) -> None:
-    """Call fn(*args) on every worker in the pool before submitting real work.
-
-    Submits exactly n identical tasks so that each idle worker executes fn once,
-    ensuring all workers share the same cached state before the next map call.
-    Logs the return values so callers can verify all workers loaded correctly.
-    """
-    results = list(pool.map(fn, [args[0]] * n if len(args) == 1 else [args] * n, chunksize=1))
-    logger.debug('_broadcast %s results: %s', fn.__name__, results)
-
 
 def _calc_derived_sync(problem, draw_points: np.ndarray, requested_labels: List[str],
                        pool: Optional[concurrent.futures.ProcessPoolExecutor] = None) -> np.ndarray:
@@ -293,14 +305,11 @@ def _calc_derived_sync(problem, draw_points: np.ndarray, requested_labels: List[
 
     model_index = molgroups_model_indices[0]
 
-    problem_json_bytes = json.dumps(bumps_serialize(problem)).encode()
-
     if pool is not None:
-        _broadcast(pool, _worker_load_bumps, problem_json_bytes)
         tasks = [(pt, model_index) for pt in draw_points]
         results = list(pool.map(_derived_worker, tasks))
     else:
-        _worker_load_bumps(problem_json_bytes)
+        _worker_load_bumps(json.dumps(bumps_serialize(problem)).encode())
         results = [_derived_worker((pt, model_index)) for pt in draw_points]
 
     return np.array([[r.get(lbl, np.nan) for lbl in requested_labels] for r in results])
@@ -311,7 +320,6 @@ class ServerState:
     job_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     is_busy: bool = False
     fitter: Optional[DreamFit] = None  # retained between calls for warm-start
-    dream_pool: Optional[concurrent.futures.ProcessPoolExecutor] = None
     # populated by /setup, cleared by /reset
     derived_labels: List[str] = field(default_factory=list)
     derived_prior_scales: np.ndarray = field(default_factory=lambda: np.array([]))
@@ -436,9 +444,15 @@ async def post_derived_draws(request: web.Request) -> web.Response:
         draw_points = np.array(json.loads(fields['draw_points']))
         requested_labels = json.loads(fields.get('requested_labels', '[]'))
 
-        derived_arr = await asyncio.to_thread(
-            _calc_derived_sync, problem, draw_points, requested_labels, state.dream_pool
-        )
+        problem_json_bytes = json.dumps(bumps_serialize(problem)).encode()
+        pool = _make_pool_for_problem(problem_json_bytes)
+        try:
+            derived_arr = await asyncio.to_thread(
+                _calc_derived_sync, problem, draw_points, requested_labels, pool
+            )
+        finally:
+            if pool is not None:
+                pool.shutdown(wait=False)
 
         buf = io.BytesIO()
         with h5py.File(buf, 'w') as f:
@@ -523,8 +537,6 @@ def _run_dream(problem, fit_options: dict, fitter: Optional[DreamFit],
         'steps':    fit_options.get('steps', 0),
     }
     if pool is not None:
-        problem_json_bytes = json.dumps(bumps_serialize(problem)).encode()
-        _broadcast(pool, _worker_load_bumps, problem_json_bytes)
         fitter.solve(monitors, mapper=lambda pop: list(pool.map(_dream_nllf_worker, pop)), **opts)
     else:
         fitter.solve(monitors, mapper=lambda p: list(map(problem.nllf, p)), **opts)
@@ -561,15 +573,12 @@ def _calc_qprofiles_sync(problem, draw_points: np.ndarray, calc_tdtldl,
         (i for i, m in enumerate(problem.models) if _is_molgroups_experiment(m)), None
     ) if requested_derived_labels else None
 
-    problem_json_bytes = json.dumps(bumps_serialize(problem)).encode()
-
     if pool is not None:
-        _broadcast(pool, _worker_load_bumps, problem_json_bytes)
         tasks = [(pt, molgroups_index, requested_derived_labels, calc_tdtldl, resolution)
                  for pt in draw_points]
         results = list(pool.map(_qprof_worker, tasks))
     else:
-        _worker_load_bumps(problem_json_bytes)
+        _worker_load_bumps(json.dumps(bumps_serialize(problem)).encode())
         results = [_qprof_worker((pt, molgroups_index, requested_derived_labels, calc_tdtldl, resolution))
                    for pt in draw_points]
 
@@ -640,6 +649,7 @@ async def post_fit(request: web.Request) -> web.Response:
     async with state.job_lock:
         state.is_busy = True
         stream_resp = None
+        pool = None
         try:
             reader = await request.multipart()
             fields = {}
@@ -673,8 +683,14 @@ async def post_fit(request: web.Request) -> web.Response:
 
             fitter_in = state.fitter if warm_start else None
 
-            logger.info('Starting DreamFit (warm_start=%s, samples=%s)',
-                        warm_start, fit_options.get('samples', 5000))
+            # Build a fresh pool whose workers have the problem pre-loaded via the
+            # initializer.  Reuse this pool for DREAM then Q-profiles so workers
+            # don't need to be respawned between the two phases.
+            problem_json_bytes = json.dumps(bumps_serialize(problem)).encode()
+            pool = _make_pool_for_problem(problem_json_bytes)
+
+            logger.info('Starting DreamFit (warm_start=%s, samples=%s, workers=%d)',
+                        warm_start, fit_options.get('samples', 5000), N_WORKERS)
 
             progress_q: stdlib_queue.Queue = stdlib_queue.Queue()
             abort_event = state.abort_fit
@@ -693,7 +709,7 @@ async def post_fit(request: web.Request) -> web.Response:
                 try:
                     return await asyncio.to_thread(
                         _run_dream, problem, fit_options, fitter_in,
-                        progress_q, abort_event, state.dream_pool,
+                        progress_q, abort_event, pool,
                     )
                 finally:
                     progress_q.put(_QUEUE_DONE)  # unblock drain even on cancellation
@@ -720,7 +736,7 @@ async def post_fit(request: web.Request) -> web.Response:
 
             qprofs, derived_arr = await asyncio.to_thread(
                 _calc_qprofiles_sync, problem, dream_state.draw().points,
-                calc_tdtldl, resolution, requested_derived_labels, state.dream_pool,
+                calc_tdtldl, resolution, requested_derived_labels, pool,
             )
 
             hdf5_bytes = await asyncio.to_thread(
@@ -745,6 +761,8 @@ async def post_fit(request: web.Request) -> web.Response:
             return stream_resp
         finally:
             state.is_busy = False
+            if pool is not None:
+                pool.shutdown(wait=False)
 
 
 @routes.post('/qprofiles')
@@ -782,11 +800,16 @@ async def post_qprofiles(request: web.Request) -> web.Response:
 
         requested_derived_labels = json.loads(fields.get('requested_derived_labels', '[]'))
 
-        state: ServerState = request.app['state']
-        qprofs, derived_arr = await asyncio.to_thread(
-            _calc_qprofiles_sync, problem, draw_points, calc_tdtldl, resolution,
-            requested_derived_labels, state.dream_pool,
-        )
+        problem_json_bytes = json.dumps(bumps_serialize(problem)).encode()
+        pool = _make_pool_for_problem(problem_json_bytes)
+        try:
+            qprofs, derived_arr = await asyncio.to_thread(
+                _calc_qprofiles_sync, problem, draw_points, calc_tdtldl, resolution,
+                requested_derived_labels, pool,
+            )
+        finally:
+            if pool is not None:
+                pool.shutdown(wait=False)
 
         buf = io.BytesIO()
         with h5py.File(buf, 'w') as f:
@@ -810,22 +833,11 @@ async def post_qprofiles(request: web.Request) -> web.Response:
 
 
 async def _on_startup(app: web.Application) -> None:
-    state: ServerState = app['state']
-    if N_WORKERS > 1:
-        state.dream_pool = concurrent.futures.ProcessPoolExecutor(
-            max_workers=N_WORKERS,
-            initializer=_worker_env_init,
-            mp_context=_POOL_MP_CONTEXT,
-        )
-        logger.info('Worker pool started (%d workers)', N_WORKERS)
+    logger.info('Fit server started (%d workers per fit)', N_WORKERS)
 
 
 async def _on_cleanup(app: web.Application) -> None:
     _shutdown.set()  # stop any DREAM thread still running after server shutdown
-    state: ServerState = app['state']
-    if state.dream_pool is not None:
-        state.dream_pool.shutdown(wait=False)
-        logger.info('Worker pool shut down')
 
 
 def build_app() -> web.Application:
