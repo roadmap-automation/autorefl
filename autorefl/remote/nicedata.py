@@ -276,7 +276,8 @@ class NICECampaignTask(Task):
                 if pos is None:
                     break
                 pos_data: List['DataPoint'] = []
-                self._skip_position_event.clear()   # reset for each new position
+                self._skip_position_event.clear()     # reset for each new position
+                self._terminate_count_event.clear()   # discard any stale terminate signal from previous skip
                 for pt in pos:
                     if self._stop_event.is_set() or self._skip_position_event.is_set():
                         break
