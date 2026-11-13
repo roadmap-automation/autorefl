@@ -175,8 +175,24 @@ class DataQueueListener(StoppableThread):
 class NICECampaignTask(Task):
     """Single long-lived NICE Task covering the full AutoRefl campaign.
 
-    Runs inside a NICE thread (via ``api.serve_tasks``). The asyncio event
-    loop communicates with it via thread-safe ``queue.Queue`` / ``threading.Event``.
+    Runs inside a NICE thread (via ``api.run_task``). The asyncio event
+    loop communicates with it via thread-safe ``queue.Queue`` /
+    ``threading.Event`` primitives.
+
+    Per-position interface
+    ----------------------
+    ``_points_in`` accepts one ``List[MeasurementPoint]`` at a time (all
+    intents for a single x value).  ``_data_out`` emits the corresponding
+    ``List[DataPoint]`` as soon as that position is complete.  The asyncio
+    side calls :meth:`measure_position` which wraps this round-trip.
+
+    Early termination
+    -----------------
+    When the DREAM fit completes before the current count finishes,
+    ``AutoReflLauncher`` calls :meth:`skip_position`, which terminates the
+    active hardware count *and* sets ``_skip_position_event`` so the NICE
+    thread skips any remaining intents (background+/−) for the current
+    position.  Partial count data is still returned and recorded.
 
     Typical wiring::
 
@@ -185,7 +201,7 @@ class NICECampaignTask(Task):
         launcher = AutoReflLauncher(exp, client, signals, maxtime, pathname,
                                     backend=backend)
         await asyncio.gather(
-            asyncio.to_thread(api.serve_tasks, task),
+            asyncio.to_thread(api.run_task, task),
             launcher.run(),
         )
     """
@@ -204,9 +220,10 @@ class NICECampaignTask(Task):
         self._snapshot_path: str | None = None
 
         # Thread-safe channels between asyncio loop and NICE thread
-        self._points_in: Queue = Queue()   # asyncio → NICE thread
-        self._data_out: Queue = Queue()    # NICE thread → asyncio
+        self._points_in: Queue = Queue()          # asyncio → NICE thread
+        self._data_out: Queue = Queue()           # NICE thread → asyncio
         self._stop_event: Event = Event()
+        self._skip_position_event: Event = Event()  # skip remaining intents for current position
         self._active_count = None
 
     async def measure_position(self, pos: List['MeasurementPoint']) -> List['DataPoint']:
@@ -215,6 +232,12 @@ class NICECampaignTask(Task):
         return await asyncio.to_thread(self._data_out.get)
 
     def terminate_count(self) -> None:
+        if self._active_count is not None:
+            self.api.terminateCount()
+
+    def skip_position(self) -> None:
+        """Terminate the current count and skip all remaining intents for this position."""
+        self._skip_position_event.set()
         if self._active_count is not None:
             self.api.terminateCount()
 
@@ -254,8 +277,9 @@ class NICECampaignTask(Task):
                 if pos is None:
                     break
                 pos_data: List['DataPoint'] = []
+                self._skip_position_event.clear()   # reset for each new position
                 for pt in pos:
-                    if self._stop_event.is_set():
+                    if self._stop_event.is_set() or self._skip_position_event.is_set():
                         break
                     self._move_count_list(pt, pos_data)
                 self._capture_snapshot()            # update snapshot after every position
@@ -391,7 +415,7 @@ class NICEBackend:
     ----------
     nice_task:
         A :class:`NICECampaignTask` instance.  The caller is responsible
-        for running ``api.serve_tasks(nice_task)`` in a separate thread
+        for running ``api.run_task(nice_task)`` in a separate thread
         (typically via ``asyncio.to_thread``) alongside ``launcher.run()``.
     """
 
@@ -419,6 +443,9 @@ class NICEBackend:
 
     def terminate_count(self) -> None:
         self.nice_task.terminate_count()
+
+    def skip_position(self) -> None:
+        self.nice_task.skip_position()
 
     def stop(self) -> None:
         self.nice_task.stop()

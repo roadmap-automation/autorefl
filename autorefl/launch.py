@@ -27,13 +27,25 @@ class AutoReflLauncher:
         launcher = AutoReflLauncher(exp, client, signals, maxtime, pathname,
                                     backend=NICEBackend(task))
         await asyncio.gather(
-            asyncio.to_thread(api.serve_tasks, task),
+            asyncio.to_thread(api.run_task, task),
             launcher.run(),
         )
 
+    Cadence
+    -------
+    Positions are measured one at a time.  After the first position of each
+    step, the DREAM fit runs as a concurrent asyncio task.  If the fit
+    completes before all pending positions are measured, the current count
+    is terminated early (via :meth:`~autorefl.backend.MeasurementBackend.skip_position`),
+    remaining pending positions are discarded, and the fit result is used
+    immediately to plan the next step.  If pending positions are exhausted
+    before the fit completes, the fit is force-stopped and the partial result
+    is used to replan.  This keeps the neutron beam busy and the fit as
+    converged as possible.
+
     For simulation, use :class:`~autorefl.backend.SimulatedBackend`.
     For custom hardware, subclass :class:`~autorefl.backend.MeasurementBackend`
-    and implement ``measure()``.
+    and implement ``measure_position()`` and ``skip_position()``.
     """
 
     def __init__(self,
@@ -220,7 +232,6 @@ class AutoReflLauncher:
             if init_step.all_foms is not None:
                 await emit_history('autorefl_fom', self._fom_payload(init_step.all_foms))
         except Exception:
-            import traceback
             traceback.print_exc()
 
         total_t = 0.0
@@ -235,72 +246,50 @@ class AutoReflLauncher:
                 parts.append(f'post={msg["chi_median"]}[{msg["chi_lo"]},{msg["chi_hi"]}]')
             asyncio.create_task(emit_history('fit_update', '  '.join(parts)))
 
+        def _q_range(x):
+            q = np.asarray(self.exp.instrument.x2q(x)).ravel()
+            return [float(q.min()), float(q.max())]
+
         pending = list(points)
         self.exp.add_step([])
-        batch_total = len(pending)
-        batch_received = 0
         fit_task: asyncio.Task | None = None
         step_k = 0
+        first_in_step = True
 
         try:
             while total_t < self.maxtime and not self._stop.is_set():
-                if not pending:
-                    break
 
-                if batch_received == 0:
-                    print(f'AutoLauncher: Step {step_k}, total time so far: {total_t:.1f} s', flush=True)
-                    await emit_history('new_step', {'step': step_k, 'text': f'Step {step_k}'})
-                    def _q_range(x):
-                        q = np.asarray(self.exp.instrument.x2q(x)).ravel()
-                        return [float(q.min()), float(q.max())]
-                    queue_data = [
-                        {'step_id': mp.step_id, 'point_id': mp.point_id, 'point_index': i,
-                         'model': mp.base.model, 'x': f'{mp.base.x:.4f}',
-                         'q_range': _q_range(mp.base.x),
-                         'intent': str(mp.base.intent), 'time': f'{mp.base.t:.1f}'}
-                        for ptlist in pending for i, mp in enumerate(ptlist)
-                    ]
-                    await emit_history('queue_update', queue_data)
-
-                pos = pending.pop(0)
-                pos_data = await self.backend.measure_position(pos)
-
-                step_id = pos[0].step_id
-                if step_id < len(self.exp.steps):
-                    self.exp.steps[step_id].points.extend(pos_data)
-                batch_received += 1
-
-                await self._run_reductus_reduction(step_k)
-
-                try:
-                    await emit_history('autorefl_data', self.update_plot_data(mark_new_step=(batch_received == 1)))
-                except Exception:
-                    traceback.print_exc()
-
-                if batch_received == 1:
-                    print('AutoLauncher: starting fit task', flush=True)
-                    fit_task = asyncio.create_task(
-                        self.exp.fit_step(self.client, warm_start=warm_start, progress_callback=_fit_progress)
-                    )
-
-                batch_done = (batch_received == batch_total)
-                early_done = (fit_task is not None and fit_task.done() and not batch_done)
-
-                if early_done or batch_done:
-                    if fit_task is not None and not fit_task.done():
-                        await self.client.post_stop_fit()
-                    if fit_task is not None:
-                        try:
-                            await fit_task
-                        except Exception:
-                            traceback.print_exc()
+                # --- Replan trigger: fit completed naturally (between measurements or
+                #     during the last measurement via skip_position) ---
+                do_replan = fit_task is not None and fit_task.done()
+                if do_replan:
+                    try:
+                        await fit_task
+                    except Exception:
+                        traceback.print_exc()
                     fit_task = None
+                    pending.clear()   # discard remaining suggestions; take_step replaces them
 
+                # --- Replan trigger: pending exhausted, fit still running ---
+                if not pending and not do_replan:
+                    if fit_task is None:
+                        break  # no more work
+                    print('AutoLauncher: pending exhausted — stopping fit to replan', flush=True)
+                    if not fit_task.done():
+                        await self.client.post_stop_fit()
+                    try:
+                        await fit_task
+                    except Exception:
+                        traceback.print_exc()
+                    fit_task = None
+                    do_replan = True
+
+                # --- Replan block (single path for both triggers) ---
+                if do_replan:
                     if self.backend.last_x is not None:
                         self.exp.instrument.x = self.backend.last_x
 
                     self._save_checkpoint(step_k)
-
                     step = self.exp.steps[step_k]
                     print('AutoLauncher: final chi-squared:', step.final_chisq, flush=True)
 
@@ -316,15 +305,13 @@ class AutoReflLauncher:
                     except Exception:
                         traceback.print_exc()
 
-                    if early_done:
-                        pending.clear()
-
                     print('AutoLauncher: calculating FOM', flush=True)
                     new_points = await asyncio.to_thread(self.exp.take_step, allow_repeat=False)
 
-                    if early_done:
-                        measured_xs = {dp.x for dp in self.exp.steps[step_k].points}
-                        new_points = [p for p in new_points if p[0].base.x not in measured_xs]
+                    # Always exclude already-measured xs (handles both natural completion
+                    # and positions partially counted before skip_position was called)
+                    measured_xs = {dp.x for dp in self.exp.steps[step_k].points}
+                    new_points = [p for p in new_points if p[0].base.x not in measured_xs]
 
                     if self._check_convergence_criteria(step, step_k):
                         await emit_history('autorefl_stop_reason', json.dumps({'reason': 'convergence_criterion', 'step': step_k}))
@@ -343,11 +330,61 @@ class AutoReflLauncher:
 
                     self.exp.add_step([])
                     pending = list(new_points)
-                    batch_received = 0
-                    batch_total = len(pending)
                     warm_start = True
                     total_t = sum(pt.t + pt.movet for step in self.exp.steps for pt in step.points)
                     step_k += 1
+                    first_in_step = True
+                    # fit starts after first position of new step (needs at least one data point)
+
+                if not pending:
+                    break  # take_step returned nothing — campaign complete
+
+                # --- Measurement ---
+                if first_in_step:
+                    print(f'AutoLauncher: Step {step_k}, total time so far: {total_t:.1f} s', flush=True)
+                    await emit_history('new_step', {'step': step_k, 'text': f'Step {step_k}'})
+                    queue_data = [
+                        {'step_id': mp.step_id, 'point_id': mp.point_id, 'point_index': i,
+                         'model': mp.base.model, 'x': f'{mp.base.x:.4f}',
+                         'q_range': _q_range(mp.base.x),
+                         'intent': str(mp.base.intent), 'time': f'{mp.base.t:.1f}'}
+                        for ptlist in pending for i, mp in enumerate(ptlist)
+                    ]
+                    await emit_history('queue_update', queue_data)
+
+                pos = pending.pop(0)
+                measure_task = asyncio.ensure_future(self.backend.measure_position(pos))
+
+                # Race the measurement against the fit; terminate position early if fit wins
+                if fit_task is not None and not fit_task.done():
+                    done, _ = await asyncio.wait(
+                        [measure_task, fit_task],
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    if fit_task in done and measure_task not in done:
+                        self.backend.skip_position()
+
+                pos_data = await measure_task
+
+                step_id = pos[0].step_id
+                if step_id < len(self.exp.steps):
+                    self.exp.steps[step_id].points.extend(pos_data)
+
+                await self._run_reductus_reduction(step_k)
+
+                try:
+                    await emit_history('autorefl_data', self.update_plot_data(mark_new_step=first_in_step))
+                except Exception:
+                    traceback.print_exc()
+
+                first_in_step = False
+
+                if fit_task is None:
+                    print('AutoLauncher: starting fit task', flush=True)
+                    fit_task = asyncio.create_task(
+                        self.exp.fit_step(self.client, warm_start=warm_start, progress_callback=_fit_progress)
+                    )
+                # fit completion checked at top of next iteration
 
         except Exception:
             print('AutoLauncher: unhandled exception in run loop:', flush=True)
@@ -355,6 +392,7 @@ class AutoReflLauncher:
             raise
         finally:
             if fit_task is not None and not fit_task.done():
+                await self.client.post_stop_fit()
                 try:
                     await fit_task
                 except Exception:
@@ -505,7 +543,7 @@ if __name__ == '__main__':
             launcher = AutoReflLauncher(exp, client, signals, maxtime=7200, pathname=pathname,
                                         backend=NICEBackend(nice_task))
             await asyncio.gather(
-                asyncio.to_thread(nice_api.serve_tasks, nice_task),
+                asyncio.to_thread(nice_api.run_task, nice_task),
                 launcher.run(),
             )
         finally:

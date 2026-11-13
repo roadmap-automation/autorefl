@@ -71,6 +71,9 @@ class MeasurementBackend:
     def terminate_count(self) -> None:
         """Signal the backend to end the current count early and accept partial data.  No-op by default."""
 
+    def skip_position(self) -> None:
+        """Terminate the current count and skip remaining intents for this position.  No-op by default."""
+
     def stop(self) -> None:
         """Signal the backend to stop cleanly.  Called by AutoReflLauncher.stop()."""
 
