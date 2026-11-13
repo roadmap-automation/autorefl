@@ -74,14 +74,9 @@ class AutoReflLauncher:
 
     def _check_convergence_criteria(self, step, k: int) -> bool:
         """Return True if any early-stop criterion is met after min_steps."""
-        if k < self.min_steps:
-            return False
-        if self.max_chi2 is not None and step.final_chisq_value is not None:
-            if step.final_chisq_value > self.max_chi2:
-                print(f'AutoLauncher: chi-sq {step.final_chisq_value:.3f} > max_chi2 {self.max_chi2} — stopping', flush=True)
-                return True
         if self.param_uncertainty and step.draw_pts is not None:
             labels = list(self.exp.problem.labels()) + list(self.exp._requested_derived_labels)
+            met = []
             for param_name, threshold in self.param_uncertainty.items():
                 try:
                     idx = labels.index(param_name)
@@ -91,10 +86,18 @@ class AutoReflLauncher:
                 if idx >= step.draw_pts.shape[1]:
                     continue
                 sigma = float(np.std(step.draw_pts[:, idx]))
-                print(f'AutoLauncher: {param_name} uncertainty = {sigma:.4g} (target < {threshold:.4g})', flush=True)
-                if sigma < threshold:
-                    print(f'AutoLauncher: uncertainty criterion met for {param_name!r} — stopping', flush=True)
-                    return True
+                ratio = sigma / threshold
+                print(f'AutoLauncher: {param_name} uncertainty = {sigma:.4g} (target < {threshold:.4g}, {ratio:.2f}x)', flush=True)
+                met.append(sigma < threshold)
+            if met and all(met) and k >= self.min_steps:
+                print('AutoLauncher: all uncertainty criteria met — stopping', flush=True)
+                return True
+        if k < self.min_steps:
+            return False
+        if self.max_chi2 is not None and step.final_chisq_value is not None:
+            if step.final_chisq_value > self.max_chi2:
+                print(f'AutoLauncher: chi-sq {step.final_chisq_value:.3f} > max_chi2 {self.max_chi2} — stopping', flush=True)
+                return True
         return False
 
     def stop(self) -> None:
