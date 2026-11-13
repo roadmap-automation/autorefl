@@ -308,33 +308,39 @@ class NICECampaignTask(Task):
     def _count_list(self, pt: 'MeasurementPoint', data: List['DataPoint']) -> None:
         """Like _count but appends to a plain list rather than a step-keyed dict.
 
-        Uses wait=False + a polling loop so that terminate/skip/stop signals set by
-        the asyncio side are detected here and api.terminateCount() is called from
-        the NICE task thread (the only thread allowed to make state-altering API calls).
+        Calls emitDataCountStart/End manually (rather than via measurement_count) so
+        that emitDataCountEnd fires AFTER the count completes.  measurement_count with
+        wait=False fires emitDataCountEnd in its finally block immediately when count()
+        returns — before the count has finished — causing the NeXus writer to open the
+        next entry while still writing the previous one, scrambling entries.
+
+        terminateCount() is always called from this method (the NICE task thread).
         """
         entry = _NICE_ENTRY.get(pt.base.intent, pt.base.intent)
         self._active_count = True
         try:
             self.api._connection.setVariable('_scanType', entry)
-            count_future = self.api.measurement_count(
-                filePrefix=self.filename,
-                entry=entry,
-                presetTime=pt.base.t,
-                wait=False,
-            )
-            # Poll until count finishes or a termination signal arrives.
-            # terminateCount() is called from here (task thread) — never from outside.
-            while not count_future.isFinished():
-                if (self._terminate_count_event.is_set() or
-                        self._stop_event.is_set() or
-                        self._skip_position_event.is_set()):
-                    self.api.terminateCount()
-                    break
-                time.sleep(0.1)
-            self._terminate_count_event.clear()
-            self.api.wait(count_future)
+            self.api._connection.emitDataCountStart(self.filename, entry, None)
+            try:
+                count_node = self.api.count(time=pt.base.t, wait=False)
+                # Poll until count finishes or a termination signal arrives.
+                # terminateCount() is called from here (task thread) — never from outside.
+                while not count_node.isFinished():
+                    if (self._terminate_count_event.is_set() or
+                            self._stop_event.is_set() or
+                            self._skip_position_event.is_set()):
+                        self.api.terminateCount()
+                        break
+                    time.sleep(0.1)
+                self.api.wait(count_node)
+            finally:
+                # emitDataCountEnd after count completes — this is the fix.
+                # With measurement_count(wait=False) this would fire immediately,
+                # before the count finished.
+                self._connection.emitDataCountEnd()
         finally:
             self._active_count = None
+            self._terminate_count_event.clear()
 
         if self._campaign_filepath is None and self._writer_tracker is not None:
             if self._writer_tracker.open_files:
