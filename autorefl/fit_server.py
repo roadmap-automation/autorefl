@@ -483,14 +483,11 @@ def _run_dream(problem, fit_options: dict, fitter: Optional[DreamFit],
     if fitter is None or fitter.state is None:
         fitter = DreamFit(problem)
     else:
-        # Re-attach to new problem object (deserialized each call).
+        # Re-attach to the new problem (new data). bumps' Dream core re-evaluates
+        # state._gen_current_logp and state._best_logp against the new nllf surface
+        # at the start of sample() (core.py), so stale logp values from the previous
+        # step do not freeze the Metropolis criterion.
         fitter.problem = problem
-        # Reset best tracking: data changed between warm-start steps, so the stored
-        # best_logp was computed under a different nllf landscape (fewer data points).
-        # Setting to -inf forces DREAM to record the first point it evaluates as the
-        # new best, so state.best() reflects this run's optimum, not the prior step's.
-        if hasattr(fitter.state, '_best_logp'):
-            fitter.state._best_logp = -np.inf
 
     _n_data = problem.dof + len(problem.getp())
 
