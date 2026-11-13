@@ -252,12 +252,6 @@ class AutoReflLauncher:
                 self._load_data(data)
                 self._save_checkpoint(k)
 
-                try:
-                    await emit_history('autorefl_data', self.update_plot_data(mark_new_step=True))
-                except Exception:
-                    import traceback
-                    traceback.print_exc()
-
                 if self.backend.last_x is not None:
                     self.exp.instrument.x = self.backend.last_x
 
@@ -265,6 +259,12 @@ class AutoReflLauncher:
                     break
 
                 await self._run_reductus_reduction(k)
+
+                try:
+                    await emit_history('autorefl_data', self.update_plot_data(mark_new_step=True))
+                except Exception:
+                    import traceback
+                    traceback.print_exc()
 
                 print('AutoLauncher: fitting data', flush=True)
                 def _fit_progress(msg: dict) -> None:
