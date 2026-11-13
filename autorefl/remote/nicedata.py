@@ -337,7 +337,7 @@ class NICECampaignTask(Task):
                 # emitDataCountEnd after count completes — this is the fix.
                 # With measurement_count(wait=False) this would fire immediately,
                 # before the count finished.
-                self._connection.emitDataCountEnd()
+                self.api._connection.emitDataCountEnd()
         finally:
             self._active_count = None
             self._terminate_count_event.clear()
