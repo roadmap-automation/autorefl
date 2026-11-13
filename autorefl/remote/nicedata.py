@@ -223,7 +223,8 @@ class NICECampaignTask(Task):
         self._points_in: Queue = Queue()          # asyncio → NICE thread
         self._data_out: Queue = Queue()           # NICE thread → asyncio
         self._stop_event: Event = Event()
-        self._skip_position_event: Event = Event()  # skip remaining intents for current position
+        self._skip_position_event: Event = Event()   # skip remaining intents for current position
+        self._terminate_count_event: Event = Event() # end current count early, continue campaign
         self._active_count = None
 
     async def measure_position(self, pos: List['MeasurementPoint']) -> List['DataPoint']:
@@ -232,20 +233,18 @@ class NICECampaignTask(Task):
         return await asyncio.to_thread(self._data_out.get)
 
     def terminate_count(self) -> None:
-        if self._active_count is not None:
-            self.api.terminateCount()
+        """Signal the task thread to end the current count early.  Safe to call from any thread."""
+        self._terminate_count_event.set()
 
     def skip_position(self) -> None:
-        """Terminate the current count and skip all remaining intents for this position."""
+        """Signal the task thread to end the current count and skip remaining intents."""
         self._skip_position_event.set()
-        if self._active_count is not None:
-            self.api.terminateCount()
+        self._terminate_count_event.set()  # wake the polling loop immediately
 
     def stop(self) -> None:
         self._stop_event.set()
-        self._points_in.put(None)  # unblock any waiting get()
-        if self._active_count is not None:
-            self.api.terminateCount()
+        self._terminate_count_event.set()  # wake the polling loop so it sees _stop_event
+        self._points_in.put(None)          # unblock any waiting _points_in.get()
 
     def _capture_snapshot(self) -> None:
         """Point _snapshot_path at the writer's live_data_path.
@@ -306,17 +305,33 @@ class NICECampaignTask(Task):
         self._count_list(pt, data)
 
     def _count_list(self, pt: 'MeasurementPoint', data: List['DataPoint']) -> None:
-        """Like _count but appends to a plain list rather than a step-keyed dict."""
+        """Like _count but appends to a plain list rather than a step-keyed dict.
+
+        Uses wait=False + a polling loop so that terminate/skip/stop signals set by
+        the asyncio side are detected here and api.terminateCount() is called from
+        the NICE task thread (the only thread allowed to make state-altering API calls).
+        """
         entry = _NICE_ENTRY.get(pt.base.intent, pt.base.intent)
         self._active_count = True
         try:
             self.api._connection.setVariable('_scanType', entry)
-            self.api.measurement_count(
+            count_future = self.api.measurement_count(
                 filePrefix=self.filename,
                 entry=entry,
                 presetTime=pt.base.t,
-                wait=True,
+                wait=False,
             )
+            # Poll until count finishes or a termination signal arrives.
+            # terminateCount() is called from here (task thread) — never from outside.
+            while not count_future.isFinished():
+                if (self._terminate_count_event.is_set() or
+                        self._stop_event.is_set() or
+                        self._skip_position_event.is_set()):
+                    self.api.terminateCount()
+                    break
+                time.sleep(0.1)
+            self._terminate_count_event.clear()
+            self.api.wait(count_future)
         finally:
             self._active_count = None
 
