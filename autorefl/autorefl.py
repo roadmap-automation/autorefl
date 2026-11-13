@@ -1343,12 +1343,15 @@ class AutoReflExperiment(AutoReflBase):
                        meas_bkg: Union[float, List[float]] = 1e-6,
                        startmodel: int = 0,
                        min_meas_time: float = 10.0,
+                       max_meas_time: Union[float, None] = None,
+                       chisq_correction: bool = False,
                        select_pars: Union[list, None] = None,
                        bestpars: Union[np.ndarray, list, None] = None) -> None:
 
         super().__init__(problem, Q, instrument, eta, npoints, switch_penalty,
                        switch_time_penalty, fit_options, entropy_options, oversampling,
-                       fit_oversampling, meas_bkg, startmodel, min_meas_time, select_pars, bestpars)
+                       fit_oversampling, meas_bkg, startmodel, min_meas_time, max_meas_time,
+                       chisq_correction, select_pars, bestpars)
 
     def get_data(self) -> List[Tuple[ReflData, Union[ReflData, None],
                                      Union[ReflData, None]]]:
