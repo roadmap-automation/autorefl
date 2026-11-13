@@ -485,6 +485,12 @@ def _run_dream(problem, fit_options: dict, fitter: Optional[DreamFit],
     else:
         # Re-attach to new problem object (deserialized each call).
         fitter.problem = problem
+        # Reset best tracking: data changed between warm-start steps, so the stored
+        # best_logp was computed under a different nllf landscape (fewer data points).
+        # Setting to -inf forces DREAM to record the first point it evaluates as the
+        # new best, so state.best() reflects this run's optimum, not the prior step's.
+        if hasattr(fitter.state, '_best_logp'):
+            fitter.state._best_logp = -np.inf
 
     _n_data = problem.dof + len(problem.getp())
 
@@ -543,10 +549,10 @@ def _run_dream(problem, fit_options: dict, fitter: Optional[DreamFit],
     else:
         fitter.solve(monitors, mapper=lambda p: list(map(problem.nllf, p)), **opts)
 
-    # Diagnostic: verify best_x gives the expected nllf when evaluated directly.
+    # Verify best_x gives the expected nllf when evaluated directly.
     _best_x, _best_logp = fitter.state.best()
     _nllf_at_best = problem.nllf(_best_x)
-    logger.debug('post-DREAM best_logp=%.4f  nllf_at_best_x=%.4f', _best_logp, _nllf_at_best)
+    logger.info('post-DREAM best_logp=%.4f  nllf_at_best_x=%.4f', _best_logp, _nllf_at_best)
 
     return fitter
 
