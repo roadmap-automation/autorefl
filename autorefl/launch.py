@@ -328,6 +328,7 @@ class AutoReflLauncher:
             traceback.print_exc()
             raise
         finally:
+            self.backend.stop()
             socket_task.cancel()
             try:
                 await socket_task
