@@ -80,9 +80,11 @@ class AutoReflBase(object):
                        meas_bkg: Union[float, List[float]] = 1e-6,
                        startmodel: int = 0,
                        min_meas_time: float = 10.0,
+                       max_meas_time: Union[float, None] = None,
+                       chisq_correction: bool = False,
                        select_pars: Union[list, None] = None,
                        bestpars: Union[np.ndarray, list, None] = None) -> None:
-        
+
         # Load instrument
         self.instrument = instrument
 
@@ -92,8 +94,9 @@ class AutoReflBase(object):
         self.switch_penalty = switch_penalty
         self.switch_time_penalty = switch_time_penalty
         self.min_meas_time = min_meas_time
+        self.max_meas_time = max_meas_time
+        self.chisq_correction = chisq_correction
         self.measq_entropy = True
-        self.chisq_correction = False
 
         # Initialize the fit problem
         self.problem = problem
@@ -622,6 +625,12 @@ class AutoReflBase(object):
                 pt[3] = max(pt[3] / chisq, self.min_meas_time)   # new_meastime
                 if pt[4] > 0:
                     pt[4] = max(pt[4] / chisq, self.min_meas_time)  # new_bkgmeastime
+
+        if self.max_meas_time is not None:
+            for pt in newpoints:
+                pt[3] = min(pt[3], self.max_meas_time)
+                if pt[4] > 0:
+                    pt[4] = min(pt[4], self.max_meas_time)
 
         points = self.request_data(newpoints, foms)
 
