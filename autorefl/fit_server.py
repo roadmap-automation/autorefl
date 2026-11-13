@@ -520,7 +520,8 @@ def _run_dream(problem, fit_options: dict, fitter: Optional[DreamFit],
 
     # Diagnostic: confirm the problem has data and a sane nllf before DREAM starts.
     _nllf_pre = problem.nllf()
-    _ndata = sum(len(getattr(m.probe, 'Q', None) or []) for m in problem.models)
+    _ndata = sum(len(sub.Q) for m in problem.models
+                 for sub in _iter_subprobes(m.probe) if getattr(sub, 'Q', None) is not None)
     logger.info('pre-DREAM nllf=%.4f  npars=%d  ndata=%d', _nllf_pre, len(problem.getp()), _ndata)
 
     monitors = MonitorRunner(monitors=[_StdoutMonitor()], problem=problem)
