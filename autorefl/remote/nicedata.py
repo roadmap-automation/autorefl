@@ -209,9 +209,9 @@ class NICECampaignTask(Task):
         self._stop_event: Event = Event()
         self._active_count = None
 
-    async def measure(self, points: List[List['MeasurementPoint']]) -> Dict[int, List['DataPoint']]:
-        """Async callable for the event loop: submit points, await data back."""
-        self._points_in.put(points)
+    async def measure_position(self, pos: List['MeasurementPoint']) -> List['DataPoint']:
+        """Async callable for the event loop: submit one position, await data back."""
+        self._points_in.put(pos)
         return await asyncio.to_thread(self._data_out.get)
 
     def terminate_count(self) -> None:
@@ -250,23 +250,78 @@ class NICECampaignTask(Task):
                                    )
         try:
             while not self._stop_event.is_set():
-                points = self._points_in.get()
-                if points is None:
+                pos = self._points_in.get()         # List[MeasurementPoint] for one x
+                if pos is None:
                     break
-                data: Dict[int, List['DataPoint']] = {}
-                cancelled = False
-                for point_list in points:
-                    for pt in point_list:
-                        if self._stop_event.is_set():
-                            cancelled = True
-                            break
-                        self._move_count(pt, data)
-                    if cancelled:
+                pos_data: List['DataPoint'] = []
+                for pt in pos:
+                    if self._stop_event.is_set():
                         break
-                self._capture_snapshot()
-                self._data_out.put(data)
+                    self._move_count_list(pt, pos_data)
+                self._capture_snapshot()            # update snapshot after every position
+                self._data_out.put(pos_data)
         finally:
             self.api.measurement_end()
+
+    def _move_count_list(self, pt: 'MeasurementPoint', data: List['DataPoint']) -> None:
+        """Same as _move_count but appends DataPoint to a plain list (per-position output)."""
+        try:
+            sa_idx = pt.movements.index('sampleAngle')
+            if float(pt.movements[sa_idx + 1]) < 0:
+                LOG.info(
+                    'Skipping point: sampleAngle=%s < 0 (x=%.4f intent=%s)',
+                    pt.movements[sa_idx + 1], pt.base.x, pt.base.intent,
+                )
+                return
+        except (ValueError, IndexError):
+            pass
+        init_time = time.time()
+        self.api.move(pt.movements)
+        pt.base.movet = time.time() - init_time
+        self.last_x = pt.base.x
+        self._count_list(pt, data)
+
+    def _count_list(self, pt: 'MeasurementPoint', data: List['DataPoint']) -> None:
+        """Like _count but appends to a plain list rather than a step-keyed dict."""
+        entry = _NICE_ENTRY.get(pt.base.intent, pt.base.intent)
+        self._active_count = True
+        try:
+            self.api._connection.setVariable('_scanType', entry)
+            self.api.measurement_count(
+                filePrefix=self.filename,
+                entry=entry,
+                presetTime=pt.base.t,
+                wait=True,
+            )
+        finally:
+            self._active_count = None
+
+        if self._campaign_filepath is None and self._writer_tracker is not None:
+            if self._writer_tracker.open_files:
+                self._campaign_filepath = self._writer_tracker.open_files[0]
+
+        detector = self.api.read('counter.countAgainstDetector')
+        counts = [int(c) for c in self.api.read(f'{detector}.counts')]
+        if pt.bank is not None:
+            strides = self.api.read(f'{detector}.strides')
+            row_stride = int(strides[1])
+            start = int(pt.bank) * row_stride
+            counts = counts[start:start + row_stride]
+        livetime = float(self.api.read('counter.liveTime'))
+
+        LOG.info(
+            'NICEBackend count: step=%d x=%.4f entry=%s livetime=%.3f s '
+            'n_detectors=%d total_counts=%d',
+            pt.step_id, pt.base.x, pt.base.intent, livetime,
+            len(counts), int(sum(counts)),
+        )
+
+        datapoint = pt.base
+        basedata = list(datapoint.data)
+        basedata[data_attributes.index('N')] = np.array(counts, ndmin=1)
+        datapoint.data = basedata
+        datapoint.t = livetime
+        data.append(datapoint)
 
     def _move_count(self, pt: 'MeasurementPoint', data: Dict[int, List['DataPoint']]) -> None:
         try:
@@ -356,11 +411,11 @@ class NICEBackend:
             return None
         return {'path': path, 'source': 'local', 'entries': None}
 
-    async def measure(
+    async def measure_position(
         self,
-        points: List[List['MeasurementPoint']],
-    ) -> Dict[int, List['DataPoint']]:
-        return await self.nice_task.measure(points)
+        pos: List['MeasurementPoint'],
+    ) -> List['DataPoint']:
+        return await self.nice_task.measure_position(pos)
 
     def terminate_count(self) -> None:
         self.nice_task.terminate_count()

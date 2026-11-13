@@ -4,6 +4,7 @@ import copy
 import os
 import json
 import time
+import traceback
 
 import numpy as np
 
@@ -110,12 +111,6 @@ class AutoReflLauncher:
         self.signals.global_start.set()
         self.signals.measurement_queue_updated.set()
         self.signals.first_measurement_complete.set()
-
-    def _load_data(self, data: dict) -> None:
-        """Merge step-keyed DataPoint dict returned by measure_step into exp.steps."""
-        for step_id, points in data.items():
-            if step_id < len(self.exp.steps):
-                self.exp.steps[step_id].points = points
 
     def _save_checkpoint(self, step_k: int) -> None:
         """Write collected DataPoints for step_k to a JSON file in the campaign directory.
@@ -229,105 +224,141 @@ class AutoReflLauncher:
             traceback.print_exc()
 
         total_t = 0.0
-        k = 0
         warm_start = False
+
+        def _fit_progress(msg: dict) -> None:
+            step = msg.get('step', '?')
+            parts = [f'step {step}', f'best={msg["chisq"]}']
+            if 'p' in msg:
+                parts.append(f'p={msg["p"]:.3f}')
+            if 'chi_median' in msg:
+                parts.append(f'post={msg["chi_median"]}[{msg["chi_lo"]},{msg["chi_hi"]}]')
+            asyncio.create_task(emit_history('fit_update', '  '.join(parts)))
+
+        pending = list(points)
+        self.exp.add_step([])
+        batch_total = len(pending)
+        batch_received = 0
+        fit_task: asyncio.Task | None = None
+        step_k = 0
 
         try:
             while total_t < self.maxtime and not self._stop.is_set():
-
-                self.exp.add_step([])
-                print('AutoLauncher: Step %i, total time so far: %.1f s' % (k, total_t), flush=True)
-
-                await emit_history('new_step', {'step': k, 'text': f'Step {k}'})
-                def _q_range(x):
-                    q = np.asarray(self.exp.instrument.x2q(x)).ravel()
-                    return [float(q.min()), float(q.max())]
-                queue_data = [
-                    {'step_id': mp.step_id, 'point_id': mp.point_id, 'point_index': i,
-                     'model': mp.base.model, 'x': f'{mp.base.x:.4f}',
-                     'q_range': _q_range(mp.base.x),
-                     'intent': str(mp.base.intent), 'time': f'{mp.base.t:.1f}'}
-                    for ptlist in points for i, mp in enumerate(ptlist)
-                ]
-                await emit_history('queue_update', queue_data)
-
-                data = await self.backend.measure(points)
-                self._load_data(data)
-                self._save_checkpoint(k)
-
-                if self.backend.last_x is not None:
-                    self.exp.instrument.x = self.backend.last_x
-
-                if self._stop.is_set():
+                if not pending:
                     break
 
-                await self._run_reductus_reduction(k)
-
-                try:
-                    await emit_history('autorefl_data', self.update_plot_data(mark_new_step=True))
-                except Exception:
-                    import traceback
-                    traceback.print_exc()
-
-                print('AutoLauncher: fitting data', flush=True)
-                def _fit_progress(msg: dict) -> None:
-                    step = msg.get('step', '?')
-                    parts = [f'step {step}', f'best={msg["chisq"]}']
-                    if 'p' in msg:
-                        parts.append(f'p={msg["p"]:.3f}')
-                    if 'chi_median' in msg:
-                        parts.append(f'post={msg["chi_median"]}[{msg["chi_lo"]},{msg["chi_hi"]}]')
-                    asyncio.create_task(emit_history('fit_update', '  '.join(parts)))
-                await self.exp.fit_step(self.client, warm_start=warm_start, progress_callback=_fit_progress)
-                warm_start = True
-
-                if self._stop.is_set():
-                    break
-
-                step = self.exp.steps[-1]
-                print('AutoLauncher: final chi-squared:', step.final_chisq, flush=True)
-
-                try:
-                    await emit_history('autorefl_profiles', self.update_plot_profiles(step.qprofs))
-                    await emit_history('autorefl_data', self.update_plot_data())
-                    convergence = [
-                        {'step': i, 'dH': s.dH, 'dH_marg': s.dH_marg, 'chisq': s.final_chisq_value}
-                        for i, s in enumerate(self.exp.steps)
-                        if s.dH is not None
+                if batch_received == 0:
+                    print(f'AutoLauncher: Step {step_k}, total time so far: {total_t:.1f} s', flush=True)
+                    await emit_history('new_step', {'step': step_k, 'text': f'Step {step_k}'})
+                    def _q_range(x):
+                        q = np.asarray(self.exp.instrument.x2q(x)).ravel()
+                        return [float(q.min()), float(q.max())]
+                    queue_data = [
+                        {'step_id': mp.step_id, 'point_id': mp.point_id, 'point_index': i,
+                         'model': mp.base.model, 'x': f'{mp.base.x:.4f}',
+                         'q_range': _q_range(mp.base.x),
+                         'intent': str(mp.base.intent), 'time': f'{mp.base.t:.1f}'}
+                        for ptlist in pending for i, mp in enumerate(ptlist)
                     ]
-                    await emit_history('autorefl_convergence', json.dumps(convergence))
-                except Exception:
-                    import traceback
-                    traceback.print_exc()
+                    await emit_history('queue_update', queue_data)
 
-                print('AutoLauncher: calculating FOM', flush=True)
-                points = await asyncio.to_thread(self.exp.take_step, allow_repeat=False)
+                pos = pending.pop(0)
+                pos_data = await self.backend.measure_position(pos)
 
-                if self._check_convergence_criteria(step, k):
-                    await emit_history('autorefl_stop_reason', json.dumps({'reason': 'convergence_criterion', 'step': k}))
-                    print('AutoLauncher: saving before early stop', flush=True)
-                    await asyncio.to_thread(self.exp.save, self.pathname + '/autoexp0.pickle')
-                    break
+                step_id = pos[0].step_id
+                if step_id < len(self.exp.steps):
+                    self.exp.steps[step_id].points.extend(pos_data)
+                batch_received += 1
 
-                step = self.exp.steps[-1]
+                await self._run_reductus_reduction(step_k)
+
                 try:
-                    if step.all_foms is not None:
-                        await emit_history('autorefl_fom', self._fom_payload(step.all_foms))
+                    await emit_history('autorefl_data', self.update_plot_data(mark_new_step=(batch_received == 1)))
                 except Exception:
-                    import traceback
                     traceback.print_exc()
 
-                print('AutoLauncher: saving', flush=True)
-                await asyncio.to_thread(self.exp.save, self.pathname + '/autoexp0.pickle')
+                if batch_received == 1:
+                    print('AutoLauncher: starting fit task', flush=True)
+                    fit_task = asyncio.create_task(
+                        self.exp.fit_step(self.client, warm_start=warm_start, progress_callback=_fit_progress)
+                    )
 
-                total_t = sum(pt.t + pt.movet for step in self.exp.steps for pt in step.points)
-                k += 1
+                batch_done = (batch_received == batch_total)
+                early_done = (fit_task is not None and fit_task.done() and not batch_done)
+
+                if early_done or batch_done:
+                    if fit_task is not None and not fit_task.done():
+                        await self.client.post_stop_fit()
+                    if fit_task is not None:
+                        try:
+                            await fit_task
+                        except Exception:
+                            traceback.print_exc()
+                    fit_task = None
+
+                    if self.backend.last_x is not None:
+                        self.exp.instrument.x = self.backend.last_x
+
+                    self._save_checkpoint(step_k)
+
+                    step = self.exp.steps[step_k]
+                    print('AutoLauncher: final chi-squared:', step.final_chisq, flush=True)
+
+                    try:
+                        if step.qprofs is not None:
+                            await emit_history('autorefl_profiles', self.update_plot_profiles(step.qprofs))
+                        await emit_history('autorefl_data', self.update_plot_data())
+                        convergence = [
+                            {'step': i, 'dH': s.dH, 'dH_marg': s.dH_marg, 'chisq': s.final_chisq_value}
+                            for i, s in enumerate(self.exp.steps) if s.dH is not None
+                        ]
+                        await emit_history('autorefl_convergence', json.dumps(convergence))
+                    except Exception:
+                        traceback.print_exc()
+
+                    if early_done:
+                        pending.clear()
+
+                    print('AutoLauncher: calculating FOM', flush=True)
+                    new_points = await asyncio.to_thread(self.exp.take_step, allow_repeat=False)
+
+                    if early_done:
+                        measured_xs = {dp.x for dp in self.exp.steps[step_k].points}
+                        new_points = [p for p in new_points if p[0].base.x not in measured_xs]
+
+                    if self._check_convergence_criteria(step, step_k):
+                        await emit_history('autorefl_stop_reason', json.dumps({'reason': 'convergence_criterion', 'step': step_k}))
+                        print('AutoLauncher: saving before early stop', flush=True)
+                        await asyncio.to_thread(self.exp.save, self.pathname + '/autoexp0.pickle')
+                        break
+
+                    try:
+                        if step.all_foms is not None:
+                            await emit_history('autorefl_fom', self._fom_payload(step.all_foms))
+                    except Exception:
+                        traceback.print_exc()
+
+                    print('AutoLauncher: saving', flush=True)
+                    await asyncio.to_thread(self.exp.save, self.pathname + '/autoexp0.pickle')
+
+                    self.exp.add_step([])
+                    pending = list(new_points)
+                    batch_received = 0
+                    batch_total = len(pending)
+                    warm_start = True
+                    total_t = sum(pt.t + pt.movet for step in self.exp.steps for pt in step.points)
+                    step_k += 1
+
         except Exception:
-            import traceback
             print('AutoLauncher: unhandled exception in run loop:', flush=True)
             traceback.print_exc()
             raise
         finally:
+            if fit_task is not None and not fit_task.done():
+                try:
+                    await fit_task
+                except Exception:
+                    pass
             self.backend.stop()
             socket_task.cancel()
             try:

@@ -2,7 +2,7 @@
 
 A MeasurementBackend is the single extension point for connecting
 AutoReflLauncher to a hardware or simulation data source.  Subclass it
-and implement measure().
+and implement measure_position().
 
 Built-in backends
 -----------------
@@ -25,7 +25,7 @@ if TYPE_CHECKING:
 class MeasurementBackend:
     """Base class for measurement hardware backends.
 
-    Subclasses must implement :meth:`measure`.  Override :meth:`stop` to
+    Subclasses must implement :meth:`measure_position`.  Override :meth:`stop` to
     clean up hardware on cancellation.  The ``last_x`` property should
     return the most recently measured x position so the launcher can keep
     ``exp.instrument.x`` current for movement-penalty calculations; return
@@ -46,26 +46,22 @@ class MeasurementBackend:
         """
         return None
 
-    async def measure(
+    async def measure_position(
         self,
-        points: list[list['MeasurementPoint']],
-    ) -> dict[int, list['DataPoint']]:
-        """Measure the requested points and return the acquired data.
+        pos: list['MeasurementPoint'],
+    ) -> list['DataPoint']:
+        """Measure one x-position (all intents) and return the acquired data.
 
         Parameters
         ----------
-        points:
-            Outer list: one element per planned measurement position.
-            Inner list: typically one specular point plus up to two
+        pos:
+            All :class:`~autorefl.datastruct.MeasurementPoint` objects for a
+            single x value — typically one specular point plus up to two
             background points (background± at the same position).
-            Each :class:`~autorefl.datastruct.MeasurementPoint` carries
-            ``step_id``, ``point_id``, ``bank``, and ``base`` (a
-            :class:`~autorefl.datastruct.DataPoint` with the planned x,
-            meastime, model index, and intent).
 
         Returns
         -------
-        dict mapping step_id → list of DataPoint
+        list of DataPoint
             Returned DataPoints must have ``T``, ``dT``, ``L``, ``dL``,
             ``N``, ``Ninc`` populated with measured values in physical
             units (degrees, Ångströms, counts).
@@ -101,18 +97,17 @@ class SimulatedBackend(MeasurementBackend):
     def last_x(self) -> float | None:
         return self._last_x
 
-    async def measure(
+    async def measure_position(
         self,
-        points: list[list['MeasurementPoint']],
-    ) -> dict[int, list['DataPoint']]:
-        data: dict[int, list[DataPoint]] = {}
-        for point_list in points:
-            for mp in point_list:
-                dp = await asyncio.to_thread(
-                    self.exp._simulate_datapoint,
-                    mp.base.model, mp.base.x, mp.base.t, mp.base.intent, None,
-                )
-                dp.movet = mp.base.movet or 0.0
-                self._last_x = mp.base.x
-                data.setdefault(mp.step_id, []).append(dp)
-        return data
+        pos: list['MeasurementPoint'],
+    ) -> list['DataPoint']:
+        result = []
+        for mp in pos:
+            dp = await asyncio.to_thread(
+                self.exp._simulate_datapoint,
+                mp.base.model, mp.base.x, mp.base.t, mp.base.intent, None,
+            )
+            dp.movet = mp.base.movet or 0.0
+            self._last_x = mp.base.x
+            result.append(dp)
+        return result
