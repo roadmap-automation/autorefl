@@ -14,7 +14,7 @@ Prerequisites
        python -m autorefl.fit_server
 
    Override host/port with env vars if needed:
-       AUTOREFL_FIT_HOST=127.0.0.1  AUTOREFL_FIT_PORT=5031
+       AUTOREFL_FIT_HOST=127.0.0.1  AUTOREFL_FIT_PORT=5040
 
 2. The example model uses molgroups — install it in the same environment:
 

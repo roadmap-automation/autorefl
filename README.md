@@ -124,7 +124,7 @@ python -m autorefl.fit_server --host 0.0.0.0 --port 5031
 
 Environment variables:
 - `AUTOREFL_FIT_HOST` — fit server hostname (default `127.0.0.1`)
-- `AUTOREFL_FIT_PORT` — fit server port (default `5031`)
+- `AUTOREFL_FIT_PORT` — fit server port (default `5040`)
 
 For simulation studies on a single machine, start the server in one terminal and run the experiment in another. For hardware experiments at NCNR, the server can run on a dedicated HPC node.
 
